@@ -11,7 +11,7 @@ A dashboard to visualize Claude Code CLI usage statistics. Parses local session 
 ## Install
 
 ```bash
-pip install -e .
+pip install git+https://github.com/BuaaJoseph/claude-code-usage-show.git
 ```
 
 ## Usage
