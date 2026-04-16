@@ -10,14 +10,30 @@ A dashboard to visualize Claude Code CLI usage statistics. Parses local session 
 
 ## Install
 
+**Recommended (uses [pipx](https://pipx.pypa.io/), handles PATH automatically):**
+
+```bash
+pipx install git+https://github.com/BuaaJoseph/claude-code-usage-show.git
+```
+
+If you don't have `pipx`: `brew install pipx && pipx ensurepath`
+
+**Alternative (pip):**
+
 ```bash
 pip install git+https://github.com/BuaaJoseph/claude-code-usage-show.git
 ```
 
+> Note: On macOS, `pip` may install the `claude-usage` script to a directory that isn't on your `PATH` (e.g. `~/Library/Python/3.x/bin`). If `claude-usage` is not found after install, use one of:
+>
+> - Run as a module: `python3 -m claude_usage`
+> - Find where pip put it: `python3 -m site --user-base` then add `/bin` to your `PATH`
+> - Or use `pipx` (recommended above)
+
 ## Usage
 
 ```bash
-claude-usage
+claude-usage              # or: python3 -m claude_usage
 ```
 
 Options:
