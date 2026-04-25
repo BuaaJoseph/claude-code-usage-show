@@ -5,3 +5,7 @@ dist/
 build/
 *.egg
 .eggs/
+assets/AppIcon.iconset/
+assets/AppIcon.icns
+*.dmg
+*.app

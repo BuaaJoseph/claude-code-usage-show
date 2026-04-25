@@ -10,27 +10,35 @@ A dashboard to visualize Claude Code CLI usage statistics. Parses local session 
 
 ## Install
 
-**Recommended (uses [pipx](https://pipx.pypa.io/), handles PATH automatically):**
+### Option 1: Mac App (DMG)
+
+Download the latest `.dmg` from [Releases](https://github.com/BuaaJoseph/claude-code-usage-show/releases), open it, and drag **Claude Code Usage.app** to Applications.
+
+### Option 2: Homebrew Cask
 
 ```bash
-pipx install git+https://github.com/BuaaJoseph/claude-code-usage-show.git
+brew install --cask BuaaJoseph/tap/claude-code-usage
 ```
 
-If you don't have `pipx`: `brew install pipx && pipx ensurepath`
-
-**Alternative (pip):**
+### Option 3: pip / pipx (CLI)
 
 ```bash
+# Recommended (handles PATH automatically)
+pipx install git+https://github.com/BuaaJoseph/claude-code-usage-show.git
+
+# Or with pip
 pip install git+https://github.com/BuaaJoseph/claude-code-usage-show.git
 ```
 
-> Note: On macOS, `pip` may install the `claude-usage` script to a directory that isn't on your `PATH` (e.g. `~/Library/Python/3.x/bin`). If `claude-usage` is not found after install, use one of:
->
-> - Run as a module: `python3 -m claude_usage`
-> - Find where pip put it: `python3 -m site --user-base` then add `/bin` to your `PATH`
-> - Or use `pipx` (recommended above)
+If `pipx` is not installed: `brew install pipx && pipx ensurepath`
+
+> If `claude-usage` command is not found after `pip install`, run as module instead: `python3 -m claude_usage`
 
 ## Usage
+
+**Mac App:** Double-click to open, dashboard appears in your browser automatically.
+
+**CLI:**
 
 ```bash
 claude-usage              # or: python3 -m claude_usage
@@ -43,6 +51,22 @@ Options:
 --host HOST       Host to bind to (default: 127.0.0.1)
 --no-browser      Don't auto-open browser
 ```
+
+## Build Mac App from Source
+
+Requires macOS with Python 3.9+.
+
+```bash
+git clone https://github.com/BuaaJoseph/claude-code-usage-show.git
+cd claude-code-usage-show
+bash scripts/build_mac.sh
+```
+
+This produces:
+- `dist/Claude Code Usage.app` - the Mac app
+- `dist/Claude-Code-Usage-0.1.0.dmg` - the DMG installer
+
+To build the DMG with a nice drag-to-Applications layout, install `create-dmg` first: `brew install create-dmg`
 
 ## Data Source
 
