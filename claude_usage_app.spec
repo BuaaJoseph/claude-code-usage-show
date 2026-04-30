@@ -2,8 +2,6 @@
 """PyInstaller spec for Claude Code Usage Mac app."""
 
 import os
-import sys
-from pathlib import Path
 
 block_cipher = None
 
@@ -27,6 +25,10 @@ a = Analysis(
         'jinja2',
         'markupsafe',
         'psutil',
+        'werkzeug',
+        'werkzeug.serving',
+        'werkzeug.routing',
+        'click',
     ],
     hookspath=[],
     hooksconfig={},
@@ -51,8 +53,8 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=True,
+    # argv_emulation causes crashes on macOS 13+; disabled intentionally
+    argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
@@ -81,5 +83,6 @@ app = BUNDLE(
         'LSMinimumSystemVersion': '10.15',
         'LSApplicationCategoryType': 'public.app-category.developer-tools',
         'NSHighResolutionCapable': True,
+        'NSAppleEventsUsageDescription': 'Claude Code Usage needs access to open your browser.',
     },
 )
