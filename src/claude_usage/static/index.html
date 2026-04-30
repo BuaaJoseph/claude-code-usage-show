@@ -2,10 +2,19 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Claude Code Usage</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="/static/style.css">
+    <style>
+        html, body {
+            overscroll-behavior: none;
+            overflow: hidden;
+            height: 100%;
+            position: fixed;
+            width: 100%;
+        }
+    </style>
 </head>
 <body>
     <div class="dashboard">
@@ -19,6 +28,7 @@
                 <div class="tabs">
                     <button class="tab active" data-tab="overview">Overview</button>
                     <button class="tab" data-tab="models">Models</button>
+                    <button class="tab" data-tab="code">Code</button>
                     <button class="tab" data-tab="realtime">Real-time</button>
                 </div>
                 <div class="time-range" id="timeRangeGroup">
@@ -88,6 +98,24 @@
                     <canvas id="dailyChart"></canvas>
                 </div>
                 <div class="models-list" id="models-list"></div>
+            </div>
+
+            <!-- Code Tab -->
+            <div class="tab-content" id="tab-code">
+                <div class="stats-grid" style="margin-bottom:16px">
+                    <div class="stat-card">
+                        <div class="stat-label">总代码行数</div>
+                        <div class="stat-value" id="code-total">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">语言数</div>
+                        <div class="stat-value" id="code-langs">-</div>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <canvas id="codeChart"></canvas>
+                </div>
+                <div class="models-list" id="code-legend"></div>
             </div>
 
             <!-- Real-time Tab -->
