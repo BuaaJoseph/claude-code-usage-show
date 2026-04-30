@@ -1,7 +1,9 @@
 """Parse Claude Code CLI local data files."""
 
 import json
+import os
 from datetime import datetime, timezone
+from typing import Optional
 from collections import defaultdict
 from pathlib import Path
 
@@ -111,6 +113,8 @@ def parse_jsonl_file(filepath: str) -> dict:
                         msg = record.get("message", {})
                         usage = msg.get("usage", {})
                         model = msg.get("model", "unknown")
+                        if model == "<synthetic>":
+                            continue
 
                         input_tokens = usage.get("input_tokens", 0)
                         cache_creation = usage.get("cache_creation_input_tokens", 0)
@@ -163,7 +167,7 @@ def find_all_session_files(claude_dir: Path) -> list[str]:
     return files
 
 
-def get_all_usage_data(claude_dir: Path | None = None) -> dict:
+def get_all_usage_data(claude_dir: Optional[Path] = None) -> dict:
     """Parse all session data and return aggregated usage info."""
     if claude_dir is None:
         claude_dir = get_claude_dir()
@@ -203,7 +207,7 @@ def get_all_usage_data(claude_dir: Path | None = None) -> dict:
     return {"sessions": all_sessions}
 
 
-def aggregate_stats(sessions: list[dict], start_date: datetime | None = None, end_date: datetime | None = None) -> dict:
+def aggregate_stats(sessions: list[dict], start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> dict:
     """Aggregate statistics from sessions within a date range."""
     filtered = []
     for s in sessions:
@@ -271,6 +275,8 @@ def aggregate_stats(sessions: list[dict], start_date: datetime | None = None, en
     models_agg: dict[str, dict[str, int]] = {}
     for s in filtered:
         for model, data in s.get("models", {}).items():
+            if model == "<synthetic>":
+                continue
             if model not in models_agg:
                 models_agg[model] = {"input_tokens": 0, "output_tokens": 0, "count": 0}
             models_agg[model]["input_tokens"] += data["input_tokens"]
@@ -292,6 +298,8 @@ def aggregate_stats(sessions: list[dict], start_date: datetime | None = None, en
     for s in filtered:
         date_str = s["start_time"].strftime("%Y-%m-%d") if s.get("start_time") else "unknown"
         for model, data in s.get("models", {}).items():
+            if model == "<synthetic>":
+                continue
             daily_tokens[date_str][model]["input_tokens"] += data["input_tokens"]
             daily_tokens[date_str][model]["output_tokens"] += data["output_tokens"]
 
@@ -347,7 +355,7 @@ def aggregate_stats(sessions: list[dict], start_date: datetime | None = None, en
     }
 
 
-def get_active_sessions(claude_dir: Path | None = None) -> list[dict]:
+def get_active_sessions(claude_dir: Optional[Path] = None) -> list[dict]:
     """Get currently active Claude Code sessions."""
     if claude_dir is None:
         claude_dir = get_claude_dir()
@@ -369,7 +377,6 @@ def get_active_sessions(claude_dir: Path | None = None) -> list[dict]:
                 kind = data.get("kind", "")
                 entrypoint = data.get("entrypoint", "")
 
-                # Try to find the session JSONL for more details
                 session_info = {
                     "pid": pid,
                     "session_id": session_id,
@@ -455,6 +462,8 @@ def _parse_realtime_data(filepath: str) -> dict:
                     msg = record.get("message", {})
                     usage = msg.get("usage", {})
                     model = msg.get("model", "unknown")
+                    if model == "<synthetic>":
+                        continue
                     data["last_model"] = model
                     data["last_activity"] = record.get("timestamp", "")
 
@@ -492,3 +501,122 @@ def format_tokens(n: int) -> str:
     elif n >= 1_000:
         return f"{n / 1_000:.1f}k"
     return str(n)
+
+
+# ---------- Git Code Lines Stats ----------
+
+LANG_EXTENSIONS = {
+    "JavaScript": [".js", ".jsx", ".mjs", ".cjs"],
+    "TypeScript": [".ts", ".tsx"],
+    "Python": [".py"],
+    "Java": [".java"],
+    "Go": [".go"],
+    "Rust": [".rs"],
+    "C/C++": [".c", ".cpp", ".h", ".hpp", ".cc", ".cxx"],
+    "Swift": [".swift"],
+    "Kotlin": [".kt", ".kts"],
+    "Ruby": [".rb"],
+    "PHP": [".php"],
+    "Shell": [".sh", ".bash", ".zsh"],
+    "HTML/CSS": [".html", ".htm", ".css", ".scss", ".less", ".sass"],
+    "Vue": [".vue"],
+    "JSON": [".json"],
+    "YAML": [".yaml", ".yml"],
+    "Markdown": [".md"],
+    "Other": [],
+}
+
+EXT_TO_LANG = {}
+for lang, exts in LANG_EXTENSIONS.items():
+    for ext in exts:
+        EXT_TO_LANG[ext] = lang
+
+
+def _get_lang_for_file(filename: str) -> str:
+    _, ext = os.path.splitext(filename.lower())
+    return EXT_TO_LANG.get(ext, "Other")
+
+
+def get_code_lines_stats(claude_dir: Optional[Path] = None) -> dict:
+    """Parse Claude Code JSONL logs to get daily code lines written by AI, grouped by language."""
+    if claude_dir is None:
+        claude_dir = get_claude_dir()
+
+    projects_dir = claude_dir / "projects"
+    if not projects_dir.exists():
+        return {"daily": {}, "total": 0, "languages": {}}
+
+    daily: dict[str, dict[str, int]] = {}
+
+    for jsonl_file in projects_dir.rglob("*.jsonl"):
+        if "/subagents/" in str(jsonl_file):
+            continue
+
+        try:
+            with open(jsonl_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if record.get("type") != "assistant":
+                        continue
+
+                    timestamp_str = record.get("timestamp", "")
+                    if not timestamp_str:
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+                        date_str = ts.strftime("%Y-%m-%d")
+                    except ValueError:
+                        continue
+
+                    for content in record.get("message", {}).get("content", []):
+                        if content.get("type") != "tool_use":
+                            continue
+
+                        tool_name = content.get("name", "")
+                        tool_input = content.get("input", {})
+
+                        if tool_name == "Write":
+                            file_path = tool_input.get("file_path", "")
+                            content_text = tool_input.get("content", "")
+                            if file_path and content_text:
+                                lines_count = len(content_text.split("\n"))
+                                lang = _get_lang_for_file(file_path)
+                                if lang not in daily.get(date_str, {}):
+                                    daily.setdefault(date_str, {})[lang] = 0
+                                daily[date_str][lang] += lines_count
+
+                        elif tool_name == "Edit":
+                            file_path = tool_input.get("file_path", "")
+                            new_string = tool_input.get("new_string", "")
+                            old_string = tool_input.get("old_string", "")
+                            if file_path and new_string:
+                                new_lines = len(new_string.split("\n"))
+                                old_lines = len(old_string.split("\n")) if old_string else 0
+                                net_lines = new_lines - old_lines
+                                lang = _get_lang_for_file(file_path)
+                                if lang not in daily.get(date_str, {}):
+                                    daily.setdefault(date_str, {})[lang] = 0
+                                daily[date_str][lang] += net_lines
+
+        except (IOError, OSError):
+            continue
+
+    langs_total: dict[str, int] = {}
+    grand_total = 0
+    for date_data in daily.values():
+        for lang, lines in date_data.items():
+            langs_total[lang] = langs_total.get(lang, 0) + lines
+            grand_total += lines
+
+    return {
+        "daily": daily,
+        "total": grand_total,
+        "languages": langs_total,
+    }
