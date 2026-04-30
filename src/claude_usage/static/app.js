@@ -96,6 +96,7 @@ function renderCurrentTab() {
     const data = statsData[currentRange] || statsData['all'];
     if (currentTab === 'overview') renderOverview(data);
     else if (currentTab === 'models') renderModels(data);
+    else if (currentTab === 'code') renderCode(data);
 }
 
 function renderOverview(data) {
@@ -118,20 +119,10 @@ function renderHeatmap(heatmap) {
     const container = document.getElementById('heatmap');
     container.innerHTML = '';
 
-    // Determine date range based on current filter
+    // Always show last 52 weeks, regardless of filter
     const today = new Date();
-    let startDate;
-    if (currentRange === '7d') {
-        startDate = new Date(today);
-        startDate.setDate(today.getDate() - 7 * 7); // Show ~7 weeks for 7d view
-    } else if (currentRange === '30d') {
-        startDate = new Date(today);
-        startDate.setDate(today.getDate() - 7 * 16); // Show ~16 weeks
-    } else {
-        // Show last 52 weeks for "all"
-        startDate = new Date(today);
-        startDate.setDate(today.getDate() - 7 * 52);
-    }
+    let startDate = new Date(today);
+    startDate.setDate(today.getDate() - 7 * 52);
 
     // Align to Sunday
     startDate.setDate(startDate.getDate() - startDate.getDay());
@@ -305,6 +296,124 @@ function renderModelsList(models, totalTokens) {
         const pct = document.createElement('div');
         pct.className = 'model-percentage';
         pct.textContent = m.percentage + '%';
+
+        item.append(dot, name, tokens, pct);
+        container.appendChild(item);
+    });
+}
+
+// ---------- Code Tab ----------
+let codeChart = null;
+
+const CODE_LANG_COLORS = [
+    '#22d3ee', '#a78bfa', '#facc15', '#4ade80',
+    '#f87171', '#fb923c', '#38bdf8', '#c084fc',
+    '#fbbf24', '#4ade80', '#67e8f9', '#fda4af',
+    '#86efac', '#fcd34d', '#93c5fd', '#d8b4fe',
+];
+
+function renderCode(data) {
+    const codeData = data.code_lines || { daily: {}, total: 0, languages: {} };
+    setText('code-total', formatNumber(codeData.total));
+    setText('code-langs', Object.keys(codeData.languages).length);
+
+    renderCodeChart(codeData.daily);
+    renderCodeLegend(codeData.languages);
+}
+
+function renderCodeChart(daily) {
+    const ctx = document.getElementById('codeChart').getContext('2d');
+    const dates = Object.keys(daily).sort();
+    const allLangs = new Set();
+    dates.forEach(d => Object.keys(daily[d]).forEach(l => allLangs.add(l)));
+    const langs = Array.from(allLangs).sort((a, b) => {
+        let totalA = 0, totalB = 0;
+        dates.forEach(d => { totalA += Math.abs(daily[d][a] || 0); totalB += Math.abs(daily[d][b] || 0); });
+        return totalB - totalA;
+    });
+
+    const labels = dates.map(d => {
+        const dt = new Date(d + 'T00:00:00');
+        return `${dt.getMonth() + 1}月${dt.getDate()}日`;
+    });
+
+    const datasets = langs.map((lang, i) => ({
+        label: lang,
+        data: dates.map(d => {
+            const val = daily[d]?.[lang] || 0;
+            return val >= 0 ? val : 0;
+        }),
+        backgroundColor: CODE_LANG_COLORS[i % CODE_LANG_COLORS.length],
+        borderRadius: 3,
+        borderSkipped: false,
+        stack: 'stack1',
+    }));
+
+    if (codeChart) codeChart.destroy();
+
+    codeChart = new Chart(ctx, {
+        type: 'bar',
+        data: { labels, datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: (item) => {
+                            const lang = langs[item.datasetIndex];
+                            const val = item.raw;
+                            return `${lang}: +${formatNumber(val)} 行`;
+                        },
+                        footer: (items) => {
+                            const idx = items[0].dataIndex;
+                            const date = dates[idx];
+                            let total = 0;
+                            langs.forEach(l => { total += daily[date]?.[l] || 0; });
+                            return `当日净增: ${formatNumber(total)} 行`;
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: { stacked: true, grid: { display: false }, ticks: { font: { size: 11 } } },
+                y: {
+                    stacked: true,
+                    grid: { color: '#f0f0f0' },
+                    ticks: { font: { size: 11 }, callback: v => formatNumber(v) },
+                }
+            }
+        }
+    });
+}
+
+function renderCodeLegend(languages) {
+    const container = document.getElementById('code-legend');
+    container.innerHTML = '';
+    const sorted = Object.entries(languages).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+
+    sorted.forEach(([lang, lines], i) => {
+        const item = document.createElement('div');
+        item.className = 'model-item';
+
+        const dot = document.createElement('div');
+        dot.className = 'model-dot';
+        dot.style.backgroundColor = CODE_LANG_COLORS[i % CODE_LANG_COLORS.length];
+
+        const name = document.createElement('div');
+        name.className = 'model-name';
+        name.textContent = lang;
+
+        const tokens = document.createElement('div');
+        tokens.className = 'model-tokens';
+        tokens.textContent = `${formatNumber(Math.abs(lines))} 行`;
+
+        const pct = document.createElement('div');
+        pct.className = 'model-percentage';
+        const total = Object.values(languages).reduce((s, v) => s + Math.abs(v), 0);
+        pct.textContent = total > 0 ? Math.round(Math.abs(lines) / total * 100) + '%' : '0%';
 
         item.append(dot, name, tokens, pct);
         container.appendChild(item);
