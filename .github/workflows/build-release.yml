@@ -1,0 +1,59 @@
+name: Build and Release Mac App
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller pillow
+          pip install -e .
+
+      - name: Generate icon
+        run: python3 scripts/create_icon.py
+
+      - name: Build .app with PyInstaller
+        run: |
+          python3 -m PyInstaller --clean --noconfirm claude_usage_app.spec
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Create DMG
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          create-dmg \
+            --volname "Claude Code Usage" \
+            --window-size 600 400 \
+            --icon-size 128 \
+            --icon "Claude Code Usage.app" 150 200 \
+            --app-drop-link 450 200 \
+            --hide-extension "Claude Code Usage.app" \
+            "dist/Claude-Code-Usage-${VERSION}.dmg" \
+            "dist/Claude Code Usage.app" \
+          || hdiutil create \
+            -volname "Claude Code Usage" \
+            -srcfolder "dist/Claude Code Usage.app" \
+            -ov -format UDZO \
+            "dist/Claude-Code-Usage-${VERSION}.dmg"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Claude-Code-Usage-*.dmg
+          generate_release_notes: true
