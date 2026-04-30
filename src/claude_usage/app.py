@@ -1,18 +1,32 @@
 """Flask web application for Claude Code Usage Dashboard."""
 
+import sys
 import webbrowser
 import threading
 import argparse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+
+def _get_base_dir() -> Path:
+    """Return the base directory for static assets.
+
+    When running as a PyInstaller bundle, resources live under sys._MEIPASS.
+    When running normally, they are next to this file.
+    """
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / "claude_usage"
+    return Path(__file__).parent
+
+
 from flask import Flask, jsonify, send_from_directory
 
 from claude_usage.parser import get_all_usage_data, aggregate_stats, get_active_sessions, get_claude_dir
 
+_base = _get_base_dir()
 app = Flask(
     __name__,
-    static_folder=str(Path(__file__).parent / "static"),
+    static_folder=str(_base / "static"),
     static_url_path="/static",
 )
 
@@ -31,7 +45,6 @@ def api_stats():
 
     now = datetime.now(timezone.utc)
 
-    # Compute stats for all time ranges
     stats_all = aggregate_stats(sessions)
     stats_30d = aggregate_stats(sessions, start_date=now - timedelta(days=30))
     stats_7d = aggregate_stats(sessions, start_date=now - timedelta(days=7))
@@ -49,7 +62,6 @@ def api_realtime():
     claude_dir = get_claude_dir()
     active = get_active_sessions(claude_dir)
 
-    # Serialize datetimes
     for s in active:
         for k, v in s.items():
             if isinstance(v, datetime):
@@ -66,7 +78,7 @@ def main():
     args = parser.parse_args()
 
     if not args.no_browser:
-        threading.Timer(1.0, lambda: webbrowser.open(f"http://{args.host}:{args.port}")).start()
+        threading.Timer(1.5, lambda: webbrowser.open(f"http://{args.host}:{args.port}")).start()
 
     print(f"\n  Claude Code Usage Dashboard")
     print(f"  http://{args.host}:{args.port}\n")
