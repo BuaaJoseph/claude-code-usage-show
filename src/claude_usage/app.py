@@ -7,21 +7,16 @@ import argparse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from flask import Flask, jsonify, send_from_directory
+
+from claude_usage.parser import get_all_usage_data, aggregate_stats, get_active_sessions, get_claude_dir, get_code_lines_stats
+
 
 def _get_base_dir() -> Path:
-    """Return the base directory for static assets.
-
-    When running as a PyInstaller bundle, resources live under sys._MEIPASS.
-    When running normally, they are next to this file.
-    """
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS) / "claude_usage"
     return Path(__file__).parent
 
-
-from flask import Flask, jsonify, send_from_directory
-
-from claude_usage.parser import get_all_usage_data, aggregate_stats, get_active_sessions, get_claude_dir
 
 _base = _get_base_dir()
 app = Flask(
@@ -45,9 +40,20 @@ def api_stats():
 
     now = datetime.now(timezone.utc)
 
+    # Compute stats for all time ranges
     stats_all = aggregate_stats(sessions)
     stats_30d = aggregate_stats(sessions, start_date=now - timedelta(days=30))
     stats_7d = aggregate_stats(sessions, start_date=now - timedelta(days=7))
+
+    # Code lines stats (shared across all ranges)
+    try:
+        code_lines = get_code_lines_stats(claude_dir)
+    except Exception:
+        code_lines = {"daily": {}, "total": 0, "languages": {}}
+
+    stats_all["code_lines"] = code_lines
+    stats_30d["code_lines"] = code_lines
+    stats_7d["code_lines"] = code_lines
 
     return jsonify({
         "all": stats_all,
@@ -62,6 +68,7 @@ def api_realtime():
     claude_dir = get_claude_dir()
     active = get_active_sessions(claude_dir)
 
+    # Serialize datetimes
     for s in active:
         for k, v in s.items():
             if isinstance(v, datetime):
