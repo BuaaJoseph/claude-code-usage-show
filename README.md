@@ -83,6 +83,12 @@ bash scripts/build_mac.sh
 
 通过 `requestId` 去重，避免 thinking + response 双条记录导致的 Token 重复计算。
 
+示例：
+<img width="2518" height="1568" alt="image" src="https://github.com/user-attachments/assets/3767601c-4599-430c-a632-256ecc572247" />
+<img width="2518" height="1568" alt="image" src="https://github.com/user-attachments/assets/67317038-ba71-472d-8fce-3665c4465856" />
+<img width="2518" height="1568" alt="image" src="https://github.com/user-attachments/assets/e5b02f32-0f66-42bf-8047-4fb5682e32dc" />
+
+
 ---
 
 <a id="english"></a>
