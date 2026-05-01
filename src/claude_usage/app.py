@@ -1,5 +1,6 @@
 """Flask web application for Claude Code Usage Dashboard."""
 
+import re
 import sys
 import os
 import webbrowser
@@ -7,9 +8,16 @@ import threading
 import argparse
 from datetime import datetime, timedelta, timezone
 
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify, send_from_directory, request
 
-from claude_usage.parser import get_all_usage_data, aggregate_stats, get_active_sessions, get_claude_dir, get_code_lines_stats
+from claude_usage.parser import (
+    get_all_usage_data,
+    aggregate_stats,
+    get_active_sessions,
+    get_claude_dir,
+    get_code_lines_stats,
+    get_session_messages,
+)
 
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     _static = os.path.join(sys._MEIPASS, "claude_usage", "static")
@@ -63,6 +71,16 @@ def api_realtime():
                 s[k] = v.isoformat()
 
     return jsonify({"active_sessions": active})
+
+
+@app.route("/api/session/<session_id>/messages")
+def api_session_messages(session_id):
+    if not re.match(r'^[a-f0-9\-]{8,64}$', session_id):
+        return jsonify({"error": "invalid session_id"}), 400
+    offset = request.args.get("offset", 0, type=int)
+    claude_dir = get_claude_dir()
+    result = get_session_messages(claude_dir, session_id, offset)
+    return jsonify(result)
 
 
 def _start_flask(host, port):
