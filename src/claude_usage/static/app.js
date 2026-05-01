@@ -70,7 +70,7 @@ async function fetchStats() {
 
 function startStatsPolling() {
     stopStatsPolling();
-    statsTimer = setInterval(fetchStats, 15000);
+    statsTimer = setInterval(fetchStats, 60000);
 }
 
 function stopStatsPolling() {
@@ -92,7 +92,7 @@ async function fetchRealtime() {
 
 function startRealtimePolling() {
     stopRealtimePolling();
-    realtimeTimer = setInterval(fetchRealtime, 15000);
+    realtimeTimer = setInterval(fetchRealtime, 5000);
 }
 
 function stopRealtimePolling() {
