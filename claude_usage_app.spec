@@ -37,6 +37,9 @@ a = Analysis(
         'werkzeug.sansio',
         'click',
         'importlib_metadata',
+        'webview',
+        'webview.platforms',
+        'webview.platforms.cocoa',
     ],
     hookspath=[],
     hooksconfig={},
@@ -84,7 +87,7 @@ app = BUNDLE(
     icon=icon_path if os.path.exists(icon_path) else None,
     bundle_identifier='com.buaajoseph.claude-code-usage',
     info_plist={
-        'CFBundleShortVersionString': '0.1.0',
+        'CFBundleShortVersionString': '0.1.2',
         'CFBundleName': 'Claude Code Usage',
         'CFBundleDisplayName': 'Claude Code Usage',
         'LSMinimumSystemVersion': '10.15',
