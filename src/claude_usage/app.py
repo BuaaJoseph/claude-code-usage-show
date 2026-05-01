@@ -11,8 +11,6 @@ from flask import Flask, jsonify, send_from_directory
 
 from claude_usage.parser import get_all_usage_data, aggregate_stats, get_active_sessions, get_claude_dir, get_code_lines_stats
 
-# Static folder: in PyInstaller bundle, _MEIPASS points to Contents/Frameworks/
-# and static files are at Contents/Frameworks/claude_usage/static/
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     _static = os.path.join(sys._MEIPASS, "claude_usage", "static")
 else:
@@ -28,7 +26,6 @@ def index():
 
 @app.route("/api/stats")
 def api_stats():
-    """Return aggregated usage statistics."""
     claude_dir = get_claude_dir()
     data = get_all_usage_data(claude_dir)
     sessions = data["sessions"]
@@ -57,7 +54,6 @@ def api_stats():
 
 @app.route("/api/realtime")
 def api_realtime():
-    """Return real-time session data."""
     claude_dir = get_claude_dir()
     active = get_active_sessions(claude_dir)
 
@@ -69,26 +65,68 @@ def api_realtime():
     return jsonify({"active_sessions": active})
 
 
+def _start_flask(host, port):
+    """Run Flask server in a background thread."""
+    app.run(host=host, port=port, debug=False, use_reloader=False)
+
+
 def main():
     host = "127.0.0.1"
     port = 8907
     no_browser = False
+    use_native = getattr(sys, "frozen", False)
 
     if not getattr(sys, "frozen", False):
         parser = argparse.ArgumentParser(description="Claude Code Usage Dashboard")
         parser.add_argument("--port", type=int, default=8907)
         parser.add_argument("--host", type=str, default="127.0.0.1")
         parser.add_argument("--no-browser", action="store_true")
+        parser.add_argument("--browser", action="store_true", help="Force open in browser instead of native window")
         args = parser.parse_args()
         host = args.host
         port = args.port
         no_browser = args.no_browser
+        if args.browser:
+            use_native = False
 
+    url = f"http://{host}:{port}"
+
+    if use_native:
+        try:
+            import webview
+            # Start Flask in background thread
+            server_thread = threading.Thread(target=_start_flask, args=(host, port), daemon=True)
+            server_thread.start()
+
+            # Wait for server to be ready
+            import time
+            import urllib.request
+            for _ in range(50):
+                try:
+                    urllib.request.urlopen(url, timeout=0.5)
+                    break
+                except Exception:
+                    time.sleep(0.1)
+
+            # Create native window
+            webview.create_window(
+                "Claude Code Usage",
+                url,
+                width=1024,
+                height=768,
+                min_size=(800, 600),
+            )
+            webview.start()
+            return
+        except ImportError:
+            pass
+
+    # Fallback: browser mode
     if not no_browser:
-        threading.Timer(1.5, lambda: webbrowser.open(f"http://{host}:{port}")).start()
+        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
 
     print(f"\n  Claude Code Usage Dashboard")
-    print(f"  http://{host}:{port}\n")
+    print(f"  {url}\n")
 
     app.run(host=host, port=port, debug=False)
 
