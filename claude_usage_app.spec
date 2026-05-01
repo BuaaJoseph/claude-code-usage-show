@@ -87,7 +87,7 @@ app = BUNDLE(
     icon=icon_path if os.path.exists(icon_path) else None,
     bundle_identifier='com.buaajoseph.claude-code-usage',
     info_plist={
-        'CFBundleShortVersionString': '0.1.2',
+        'CFBundleShortVersionString': '1.0.0',
         'CFBundleName': 'Claude Code Usage',
         'CFBundleDisplayName': 'Claude Code Usage',
         'LSMinimumSystemVersion': '10.15',
