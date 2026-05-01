@@ -2,77 +2,28 @@
 
 import sys
 import os
-import logging
 import webbrowser
 import threading
 import argparse
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from flask import Flask, jsonify, send_from_directory
 
-
-def _find_static_folder() -> str:
-    """Find the static folder, checking multiple possible locations."""
-    candidates = []
-
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        base = Path(sys._MEIPASS)
-        candidates.append(base / "claude_usage" / "static")
-        candidates.append(base / "static")
-        candidates.append(base)
-
-    candidates.append(Path(__file__).parent / "static")
-
-    for c in candidates:
-        if c.is_dir() and (c / "index.html").exists():
-            return str(c)
-
-    return str(candidates[0]) if candidates else str(Path(__file__).parent / "static")
-
-
-def _setup_logging():
-    """Set up file-based logging for the bundled app."""
-    if not getattr(sys, "frozen", False):
-        return
-
-    log_dir = Path.home() / ".claude-usage-logs"
-    log_dir.mkdir(exist_ok=True)
-    log_file = log_dir / "app.log"
-
-    logging.basicConfig(
-        filename=str(log_file),
-        level=logging.DEBUG,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
-    sys.stdout = open(str(log_dir / "stdout.log"), "w")
-    sys.stderr = open(str(log_dir / "stderr.log"), "w")
-
-
-_setup_logging()
-
 from claude_usage.parser import get_all_usage_data, aggregate_stats, get_active_sessions, get_claude_dir, get_code_lines_stats
 
-static_folder = _find_static_folder()
-logging.info(f"Static folder: {static_folder}")
-logging.info(f"Static folder exists: {os.path.isdir(static_folder)}")
-if os.path.isdir(static_folder):
-    logging.info(f"Static folder contents: {os.listdir(static_folder)}")
+# Static folder: in PyInstaller bundle, _MEIPASS points to Contents/Frameworks/
+# and static files are at Contents/Frameworks/claude_usage/static/
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    _static = os.path.join(sys._MEIPASS, "claude_usage", "static")
+else:
+    _static = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
-app = Flask(
-    __name__,
-    static_folder=static_folder,
-    static_url_path="/static",
-)
+app = Flask(__name__, static_folder=_static, static_url_path="/static")
 
 
 @app.route("/")
 def index():
-    try:
-        return send_from_directory(app.static_folder, "index.html")
-    except Exception as e:
-        logging.error(f"Error serving index.html: {e}")
-        return f"Error: static_folder={app.static_folder}, exists={os.path.isdir(app.static_folder)}, error={e}", 500
+    return send_from_directory(app.static_folder, "index.html")
 
 
 @app.route("/api/stats")
@@ -136,7 +87,6 @@ def main():
     if not no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(f"http://{host}:{port}")).start()
 
-    logging.info(f"Starting server on {host}:{port}")
     print(f"\n  Claude Code Usage Dashboard")
     print(f"  http://{host}:{port}\n")
 
