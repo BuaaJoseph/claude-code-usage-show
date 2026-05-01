@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version number (e.g. 0.1.0)"
+        description: "Version number (e.g. 0.1.2)"
         required: true
-        default: "0.1.0"
+        default: "0.1.2"
 
 permissions:
   contents: write
@@ -35,7 +35,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyinstaller pillow
+          pip install pyinstaller pillow pywebview
           pip install -e .
 
       - name: Generate icon
@@ -70,7 +70,7 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git tag -a "v${VERSION}" -m "Release v${VERSION}"
+          git tag -a "v${VERSION}" -m "Release v${VERSION}" || true
           git push origin "v${VERSION}" || true
 
       - name: Upload to GitHub Release
