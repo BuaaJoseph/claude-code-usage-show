@@ -7,6 +7,9 @@ let dailyChart = null;
 let realtimeTimer = null;
 let statsTimer = null;
 
+// Store latest realtime session data by session_id for detail view
+const _realtimeSessions = {};
+
 // Color palette for models
 const MODEL_COLORS = [
     '#4a9eff', '#6366f1', '#a78bfa', '#818cf8',
@@ -20,6 +23,8 @@ document.addEventListener('DOMContentLoaded', () => {
     setupTimeRange();
     fetchStats();
     startStatsPolling();
+
+    document.getElementById('detail-back-btn').addEventListener('click', closeSessionDetail);
 });
 
 function setupTabs() {
@@ -84,6 +89,10 @@ async function fetchRealtime() {
     try {
         const res = await fetch('/api/realtime');
         const data = await res.json();
+        // Cache session data for detail view
+        (data.active_sessions || []).forEach(s => {
+            if (s.session_id) _realtimeSessions[s.session_id] = s;
+        });
         renderRealtime(data.active_sessions);
     } catch (e) {
         console.error('Failed to fetch realtime:', e);
@@ -447,9 +456,6 @@ function renderRealtime(sessions) {
     container.innerHTML = sessions.map(s => {
         const contextPct = s.context_percentage || 0;
         const barClass = contextPct > 80 ? 'context-bar-fill warning' : 'context-bar-fill';
-        const startTime = s.started_at
-            ? new Date(s.started_at).toLocaleString('zh-CN')
-            : '-';
         const uptime = s.started_at
             ? formatDuration(Date.now() - s.started_at)
             : '-';
@@ -481,6 +487,7 @@ function renderRealtime(sessions) {
                     <div class="status-dot"></div>
                     <span style="color:#40c463">运行中</span>
                 </div>
+                <button class="session-detail-btn" onclick="openSessionDetail('${s.session_id}')">查看详情 →</button>
             </div>
             <div class="session-meta">
                 <div class="meta-item">
@@ -532,6 +539,290 @@ function renderRealtime(sessions) {
             ${subagentsHtml}
         </div>`;
     }).join('');
+}
+
+// ---------- Session Detail View ----------
+let detailSessionId = null;
+let detailOffset = 0;
+let detailTimer = null;
+
+function openSessionDetail(sessionId) {
+    const s = _realtimeSessions[sessionId] || {};
+    detailSessionId = sessionId;
+    detailOffset = 0;
+
+    // Populate header
+    document.getElementById('detail-cwd').textContent = s.cwd || sessionId;
+    document.getElementById('detail-model-badge').textContent = s.last_model || '';
+
+    // Show overlay
+    document.getElementById('session-detail').classList.add('open');
+    document.getElementById('detail-messages').innerHTML = '<div class="detail-loading">加载中...</div>';
+
+    fetchDetailMessages();
+    startDetailPolling();
+}
+
+function closeSessionDetail() {
+    document.getElementById('session-detail').classList.remove('open');
+    stopDetailPolling();
+    detailSessionId = null;
+    detailOffset = 0;
+}
+
+function startDetailPolling() {
+    stopDetailPolling();
+    detailTimer = setInterval(fetchDetailMessages, 3000);
+}
+
+function stopDetailPolling() {
+    if (detailTimer) {
+        clearInterval(detailTimer);
+        detailTimer = null;
+    }
+}
+
+async function fetchDetailMessages() {
+    if (!detailSessionId) return;
+    try {
+        const res = await fetch(`/api/session/${detailSessionId}/messages?offset=${detailOffset}`);
+        const data = await res.json();
+        if (data.messages && data.messages.length > 0) {
+            appendDetailMessages(data.messages);
+        }
+        if (data.offset !== undefined) detailOffset = data.offset;
+    } catch (e) {
+        console.error('Failed to fetch session messages:', e);
+    }
+}
+
+function appendDetailMessages(messages) {
+    const container = document.getElementById('detail-messages');
+
+    // Remove loading indicator on first batch
+    const loading = container.querySelector('.detail-loading');
+    if (loading) loading.remove();
+
+    const wasAtBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 60;
+
+    messages.forEach(msg => {
+        const el = renderDetailMessage(msg);
+        if (el) container.appendChild(el);
+    });
+
+    if (wasAtBottom) {
+        container.scrollTop = container.scrollHeight;
+    }
+}
+
+function renderDetailMessage(msg) {
+    if (msg.type === 'user') return renderUserMessage(msg);
+    if (msg.type === 'assistant') return renderAssistantMessage(msg);
+    return null;
+}
+
+function renderUserMessage(msg) {
+    const content = msg.content || [];
+    const timeStr = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString('zh-CN') : '';
+
+    const toolResults = content.filter(c => c.type === 'tool_result');
+    const textBlocks = content.filter(c => c.type === 'text');
+
+    // Pure tool-result message: render as result blocks only (no user bubble)
+    if (toolResults.length > 0 && textBlocks.length === 0) {
+        const frag = document.createDocumentFragment();
+        toolResults.forEach(tr => {
+            const el = renderToolResult(tr, timeStr);
+            if (el) frag.appendChild(el);
+        });
+        return frag.childNodes.length > 0 ? frag : null;
+    }
+
+    const row = document.createElement('div');
+    row.className = 'msg-row msg-user';
+
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+    meta.innerHTML = `<span class="msg-role">User</span><span>${timeStr}</span>`;
+    row.appendChild(meta);
+
+    const allText = textBlocks.map(c => c.text || '').concat(
+        content.filter(c => typeof c === 'string')
+    ).join('\n').trim();
+
+    if (allText) {
+        const bubble = document.createElement('div');
+        bubble.className = 'msg-bubble';
+        bubble.textContent = allText;
+        row.appendChild(bubble);
+    }
+
+    // Mixed tool results in an otherwise text message
+    toolResults.forEach(tr => {
+        const el = renderToolResult(tr, '');
+        if (el) row.appendChild(el);
+    });
+
+    return row.children.length > 1 ? row : null;
+}
+
+function renderAssistantMessage(msg) {
+    const content = msg.content || [];
+    const timeStr = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString('zh-CN') : '';
+    const model = msg.model || '';
+    const usage = msg.usage || {};
+    const totalIn = usage.input_tokens || 0;
+    const totalOut = usage.output_tokens || 0;
+
+    const row = document.createElement('div');
+    row.className = 'msg-row msg-assistant';
+
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+    meta.innerHTML = `
+        <span class="msg-role">Claude</span>
+        <span class="msg-model-badge">${escapeHtml(model)}</span>
+        <span class="msg-tokens">↑${formatTokens(totalIn)} ↓${formatTokens(totalOut)}</span>
+        <span>${timeStr}</span>
+    `;
+    row.appendChild(meta);
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+
+    content.forEach(block => {
+        if (block.type === 'thinking') {
+            const el = buildThinkingBlock(block);
+            if (el) bubble.appendChild(el);
+        } else if (block.type === 'text') {
+            if (block.text && block.text.trim()) {
+                const div = document.createElement('div');
+                div.className = 'msg-text';
+                div.textContent = block.text;
+                bubble.appendChild(div);
+            }
+        } else if (block.type === 'tool_use') {
+            const el = buildToolCall(block);
+            if (el) bubble.appendChild(el);
+        }
+    });
+
+    if (bubble.children.length > 0) row.appendChild(bubble);
+
+    return row.children.length > 1 ? row : null;
+}
+
+function buildThinkingBlock(block) {
+    const thinking = block.thinking || '';
+    if (!thinking) return null;
+
+    const el = document.createElement('div');
+    el.className = 'thinking-block';
+
+    const header = document.createElement('div');
+    header.className = 'thinking-header';
+    header.innerHTML = `<span>▶</span><span>思考过程</span><span style="margin-left:auto;color:#a5b4fc">${formatNumber(thinking.length)} chars</span>`;
+
+    const body = document.createElement('div');
+    body.className = 'thinking-body';
+    body.style.display = 'none';
+    const pre = document.createElement('pre');
+    pre.textContent = thinking.length > 3000 ? thinking.slice(0, 3000) + '\n…(truncated)' : thinking;
+    body.appendChild(pre);
+
+    header.addEventListener('click', () => {
+        const open = body.style.display !== 'none';
+        body.style.display = open ? 'none' : 'block';
+        header.querySelector('span').textContent = open ? '▶' : '▼';
+    });
+
+    el.appendChild(header);
+    el.appendChild(body);
+    return el;
+}
+
+function buildToolCall(block) {
+    const toolName = block.name || 'unknown';
+    const input = block.input || {};
+
+    let summary = '';
+    if (input.file_path) summary = input.file_path;
+    else if (input.command) summary = String(input.command).slice(0, 80);
+    else if (input.path) summary = input.path;
+    else if (input.description) summary = String(input.description).slice(0, 80);
+
+    const el = document.createElement('div');
+    el.className = 'tool-call';
+
+    const header = document.createElement('div');
+    header.className = 'tool-call-header';
+    header.innerHTML = `
+        <span class="tool-icon">🔧</span>
+        <span class="tool-name">${escapeHtml(toolName)}</span>
+        ${summary ? `<span class="tool-summary">${escapeHtml(summary)}</span>` : ''}
+        <span class="tool-chevron">▶</span>
+    `;
+
+    const body = document.createElement('div');
+    body.className = 'tool-call-body';
+    body.style.display = 'none';
+    const pre = document.createElement('pre');
+    const inputStr = JSON.stringify(input, null, 2);
+    pre.textContent = inputStr.length > 4000 ? inputStr.slice(0, 4000) + '\n…(truncated)' : inputStr;
+    body.appendChild(pre);
+
+    header.addEventListener('click', () => {
+        const open = body.style.display !== 'none';
+        body.style.display = open ? 'none' : 'block';
+        header.querySelector('.tool-chevron').textContent = open ? '▶' : '▼';
+    });
+
+    el.appendChild(header);
+    el.appendChild(body);
+    return el;
+}
+
+function renderToolResult(block, timeStr) {
+    const rawContent = block.content || '';
+    let text = '';
+    if (typeof rawContent === 'string') {
+        text = rawContent;
+    } else if (Array.isArray(rawContent)) {
+        text = rawContent.map(c => c.text || c.content || '').join('\n');
+    }
+    if (!text.trim() && !block.is_error) return null;
+
+    const isError = !!block.is_error;
+    const el = document.createElement('div');
+    el.className = isError ? 'tool-result error' : 'tool-result';
+
+    const header = document.createElement('div');
+    header.className = 'tool-result-header';
+    const icon = isError ? '✗' : '✓';
+    const label = isError ? '工具错误' : '工具返回';
+    header.innerHTML = `
+        <span>${icon}</span>
+        <span>${label}</span>
+        ${timeStr ? `<span style="margin-left:auto;color:#9ca3af">${timeStr}</span>` : ''}
+        <span class="tool-chevron" style="margin-left:${timeStr ? '8px' : 'auto'}">▶</span>
+    `;
+
+    const body = document.createElement('div');
+    body.className = 'tool-result-body';
+    body.style.display = 'none';
+    const pre = document.createElement('pre');
+    pre.textContent = text.length > 4000 ? text.slice(0, 4000) + '\n…(truncated)' : text;
+    body.appendChild(pre);
+
+    header.addEventListener('click', () => {
+        const open = body.style.display !== 'none';
+        body.style.display = open ? 'none' : 'block';
+        header.querySelector('.tool-chevron').textContent = open ? '▶' : '▼';
+    });
+
+    el.appendChild(header);
+    el.appendChild(body);
+    return el;
 }
 
 // ---------- Utilities ----------
