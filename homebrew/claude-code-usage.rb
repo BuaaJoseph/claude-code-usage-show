@@ -9,7 +9,7 @@
 #   brew install --cask /path/to/claude-code-usage.rb
 
 cask "claude-code-usage" do
-  version "1.0.0"
+  version "1.0.1"
   sha256 :no_check # Update with actual SHA256 after uploading DMG
 
   url "https://github.com/BuaaJoseph/claude-code-usage-show/releases/download/v#{version}/Claude-Code-Usage-#{version}.dmg"
