@@ -492,6 +492,102 @@ def _parse_realtime_data(filepath: str) -> dict:
     return data
 
 
+def get_session_messages(claude_dir: Path, session_id: str, offset: int = 0) -> dict:
+    """Read messages from a session JSONL file starting from line offset.
+
+    Returns structured messages suitable for the detail view, merging
+    assistant content blocks that share the same requestId.
+    """
+    projects_dir = claude_dir / "projects"
+    jsonl_path: Optional[Path] = None
+    for f in projects_dir.rglob(f"{session_id}.jsonl"):
+        jsonl_path = f
+        break
+
+    if not jsonl_path or not jsonl_path.exists():
+        return {"messages": [], "offset": offset, "session_id": session_id}
+
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
+            all_lines = fh.readlines()
+    except IOError:
+        return {"messages": [], "offset": offset, "session_id": session_id}
+
+    new_offset = len(all_lines)
+    messages: list[dict] = []
+    request_map: dict[str, int] = {}  # requestId -> index in messages
+
+    for line in all_lines[offset:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        record_type = record.get("type", "")
+
+        if record_type == "user":
+            msg = record.get("message", {})
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                if not content.strip():
+                    continue
+                content = [{"type": "text", "text": content}]
+            elif not content:
+                continue
+            messages.append({
+                "type": "user",
+                "timestamp": record.get("timestamp", ""),
+                "uuid": record.get("uuid", ""),
+                "content": content,
+            })
+
+        elif record_type == "assistant":
+            request_id = record.get("requestId", "")
+            msg = record.get("message", {})
+            model = msg.get("model", "")
+            if model == "<synthetic>":
+                continue
+
+            content_blocks = msg.get("content", [])
+            if not content_blocks:
+                continue
+
+            if request_id and request_id in request_map:
+                # Merge additional content blocks from same API call
+                messages[request_map[request_id]]["content"].extend(content_blocks)
+            else:
+                usage = msg.get("usage", {})
+                total_in = (
+                    usage.get("input_tokens", 0)
+                    + usage.get("cache_creation_input_tokens", 0)
+                    + usage.get("cache_read_input_tokens", 0)
+                )
+                entry: dict = {
+                    "type": "assistant",
+                    "timestamp": record.get("timestamp", ""),
+                    "requestId": request_id,
+                    "model": model,
+                    "stop_reason": msg.get("stop_reason", ""),
+                    "usage": {
+                        "input_tokens": total_in,
+                        "output_tokens": usage.get("output_tokens", 0),
+                    },
+                    "content": list(content_blocks),
+                }
+                if request_id:
+                    request_map[request_id] = len(messages)
+                messages.append(entry)
+
+    return {
+        "messages": messages,
+        "offset": new_offset,
+        "session_id": session_id,
+    }
+
+
 def format_tokens(n: int) -> str:
     """Format token count for display."""
     if n >= 1_000_000_000:
