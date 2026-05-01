@@ -5,6 +5,7 @@ let currentRange = '7d';
 let currentTab = 'overview';
 let dailyChart = null;
 let realtimeTimer = null;
+let statsTimer = null;
 
 // Color palette for models
 const MODEL_COLORS = [
@@ -18,6 +19,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupTabs();
     setupTimeRange();
     fetchStats();
+    startStatsPolling();
 });
 
 function setupTabs() {
@@ -60,13 +62,22 @@ async function fetchStats() {
     try {
         const res = await fetch('/api/stats');
         statsData = await res.json();
-        renderCurrentTab();
+        if (currentTab !== 'realtime') renderCurrentTab();
     } catch (e) {
         console.error('Failed to fetch stats:', e);
     }
+}
 
-    // Auto-refresh every 60 seconds
-    setTimeout(fetchStats, 60000);
+function startStatsPolling() {
+    stopStatsPolling();
+    statsTimer = setInterval(fetchStats, 15000);
+}
+
+function stopStatsPolling() {
+    if (statsTimer) {
+        clearInterval(statsTimer);
+        statsTimer = null;
+    }
 }
 
 async function fetchRealtime() {
@@ -81,7 +92,7 @@ async function fetchRealtime() {
 
 function startRealtimePolling() {
     stopRealtimePolling();
-    realtimeTimer = setInterval(fetchRealtime, 5000);
+    realtimeTimer = setInterval(fetchRealtime, 15000);
 }
 
 function stopRealtimePolling() {
