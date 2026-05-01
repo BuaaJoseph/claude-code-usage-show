@@ -6,7 +6,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-VERSION="0.1.0"
+VERSION="1.0.0"
 APP_NAME="Claude Code Usage"
 DMG_NAME="Claude-Code-Usage-${VERSION}"
 
