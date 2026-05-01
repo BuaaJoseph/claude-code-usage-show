@@ -6,15 +6,18 @@ import os
 block_cipher = None
 
 src_dir = os.path.join(os.path.dirname(os.path.abspath(SPEC)), 'src')
-static_dir = os.path.join(src_dir, 'claude_usage', 'static')
+pkg_dir = os.path.join(src_dir, 'claude_usage')
+static_dir = os.path.join(pkg_dir, 'static')
 icon_path = os.path.join(os.path.dirname(os.path.abspath(SPEC)), 'assets', 'AppIcon.icns')
 
 a = Analysis(
-    [os.path.join(src_dir, 'claude_usage', 'app.py')],
+    [os.path.join(pkg_dir, 'app.py')],
     pathex=[src_dir],
     binaries=[],
     datas=[
         (static_dir, 'claude_usage/static'),
+        (os.path.join(pkg_dir, '__init__.py'), 'claude_usage'),
+        (os.path.join(pkg_dir, 'parser.py'), 'claude_usage'),
     ],
     hiddenimports=[
         'claude_usage',
@@ -22,13 +25,18 @@ a = Analysis(
         'claude_usage.app',
         'flask',
         'flask.json',
+        'flask.sansio',
+        'flask.sansio.blueprints',
         'jinja2',
+        'jinja2.ext',
         'markupsafe',
         'psutil',
         'werkzeug',
         'werkzeug.serving',
         'werkzeug.routing',
+        'werkzeug.sansio',
         'click',
+        'importlib_metadata',
     ],
     hookspath=[],
     hooksconfig={},
@@ -53,7 +61,6 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
-    # argv_emulation causes crashes on macOS 13+; disabled intentionally
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
