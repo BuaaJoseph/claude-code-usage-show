@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Optional
 from collections import defaultdict
@@ -13,6 +14,14 @@ import psutil
 def get_claude_dir() -> Path:
     """Get the Claude Code data directory."""
     return Path.home() / ".claude"
+
+
+def get_codex_dir() -> Path:
+    """Get the Codex CLI data directory."""
+    env = os.environ.get("CODEX_HOME")
+    if env:
+        return Path(env)
+    return Path.home() / ".codex"
 
 
 def parse_sessions_metadata(claude_dir: Path) -> dict[str, dict]:
@@ -202,6 +211,157 @@ def get_all_usage_data(claude_dir: Optional[Path] = None) -> dict:
         # Convert defaultdict to regular dict for JSON serialization
         session_data["models"] = dict(session_data["models"])
 
+        all_sessions.append(session_data)
+
+    for s in all_sessions:
+        s["source"] = "claude"
+
+    return {"sessions": all_sessions}
+
+
+def find_all_codex_session_files(codex_dir: Path) -> list[str]:
+    """Find all Codex rollout JSONL files under ~/.codex/sessions/."""
+    files = []
+    sessions_dir = codex_dir / "sessions"
+    if not sessions_dir.exists():
+        return files
+    for jsonl_file in sessions_dir.rglob("*.jsonl"):
+        files.append(str(jsonl_file))
+    return files
+
+
+def parse_codex_jsonl_file(filepath: str) -> dict:
+    """Parse a single Codex rollout JSONL file and extract usage data.
+
+    Codex rollouts use line records of the form:
+        {"timestamp": ..., "type": "session_meta" | "response_item" | "event_msg" | "turn_context", "payload": {...}}
+    Token usage is reported in `event_msg` records of type `token_count`.
+    """
+    session_data = {
+        "session_id": "",
+        "messages": [],
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "models": defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "count": 0}),
+        "start_time": None,
+        "end_time": None,
+        "message_count": 0,
+        "user_message_count": 0,
+        "assistant_message_count": 0,
+        "timestamps": [],
+    }
+
+    current_model = ""
+    last_total_in = 0
+    last_total_out = 0
+
+    try:
+        with open(filepath, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                ts_str = record.get("timestamp", "")
+                if ts_str:
+                    try:
+                        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        if session_data["start_time"] is None or ts < session_data["start_time"]:
+                            session_data["start_time"] = ts
+                        if session_data["end_time"] is None or ts > session_data["end_time"]:
+                            session_data["end_time"] = ts
+                    except ValueError:
+                        pass
+
+                rec_type = record.get("type", "")
+                payload = record.get("payload") or {}
+                if not isinstance(payload, dict):
+                    continue
+
+                if rec_type == "session_meta":
+                    sid = payload.get("id") or payload.get("session_id") or ""
+                    if sid and not session_data["session_id"]:
+                        session_data["session_id"] = sid
+                    cwd = payload.get("cwd") or payload.get("workingDir") or ""
+                    if cwd:
+                        session_data["cwd"] = cwd
+                    model = payload.get("model")
+                    if model and not current_model:
+                        current_model = model
+
+                elif rec_type == "turn_context":
+                    model = payload.get("model")
+                    if model:
+                        current_model = model
+
+                elif rec_type == "response_item":
+                    p_type = payload.get("type", "")
+                    if p_type == "message":
+                        role = payload.get("role", "")
+                        if role == "user":
+                            session_data["user_message_count"] += 1
+                            session_data["message_count"] += 1
+                            if ts_str:
+                                session_data["timestamps"].append(ts_str)
+                        elif role == "assistant":
+                            session_data["assistant_message_count"] += 1
+                            session_data["message_count"] += 1
+                            if ts_str:
+                                session_data["timestamps"].append(ts_str)
+
+                elif rec_type == "event_msg":
+                    p_type = payload.get("type", "")
+                    if p_type == "token_count":
+                        info = payload.get("info") or {}
+                        last_usage = info.get("last_token_usage") or {}
+                        in_t = (last_usage.get("input_tokens") or 0) + (last_usage.get("cached_input_tokens") or 0)
+                        out_t = (last_usage.get("output_tokens") or 0) + (last_usage.get("reasoning_output_tokens") or 0)
+                        if in_t == 0 and out_t == 0:
+                            total = info.get("total_token_usage") or {}
+                            cur_in = (total.get("input_tokens") or 0) + (total.get("cached_input_tokens") or 0)
+                            cur_out = (total.get("output_tokens") or 0) + (total.get("reasoning_output_tokens") or 0)
+                            in_t = max(0, cur_in - last_total_in)
+                            out_t = max(0, cur_out - last_total_out)
+                            last_total_in = cur_in
+                            last_total_out = cur_out
+                        if in_t == 0 and out_t == 0:
+                            continue
+                        model_key = current_model or "codex"
+                        session_data["total_input_tokens"] += in_t
+                        session_data["total_output_tokens"] += out_t
+                        session_data["models"][model_key]["input_tokens"] += in_t
+                        session_data["models"][model_key]["output_tokens"] += out_t
+                        session_data["models"][model_key]["count"] += 1
+    except IOError:
+        pass
+
+    if not session_data["session_id"]:
+        stem = Path(filepath).stem
+        m = re.search(r"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})", stem)
+        session_data["session_id"] = m.group(1) if m else stem
+
+    return session_data
+
+
+def get_all_codex_usage_data(codex_dir: Optional[Path] = None) -> dict:
+    """Parse all Codex rollout files and return data shaped like Claude's."""
+    if codex_dir is None:
+        codex_dir = get_codex_dir()
+
+    session_files = find_all_codex_session_files(codex_dir)
+    all_sessions = []
+
+    for filepath in session_files:
+        session_data = parse_codex_jsonl_file(filepath)
+        if session_data["message_count"] == 0:
+            continue
+        session_data["filepath"] = filepath
+        session_data["source"] = "codex"
+        session_data["models"] = dict(session_data["models"])
         all_sessions.append(session_data)
 
     return {"sessions": all_sessions}

@@ -12,9 +12,11 @@ from flask import Flask, jsonify, send_from_directory, request
 
 from claude_usage.parser import (
     get_all_usage_data,
+    get_all_codex_usage_data,
     aggregate_stats,
     get_active_sessions,
     get_claude_dir,
+    get_codex_dir,
     get_code_lines_stats,
     get_session_messages,
 )
@@ -34,9 +36,18 @@ def index():
 
 @app.route("/api/stats")
 def api_stats():
+    source = request.args.get("source", "all")
+    if source not in ("all", "claude", "codex"):
+        source = "all"
+
     claude_dir = get_claude_dir()
-    data = get_all_usage_data(claude_dir)
-    sessions = data["sessions"]
+    codex_dir = get_codex_dir()
+
+    sessions: list = []
+    if source in ("all", "claude"):
+        sessions.extend(get_all_usage_data(claude_dir)["sessions"])
+    if source in ("all", "codex"):
+        sessions.extend(get_all_codex_usage_data(codex_dir)["sessions"])
 
     now = datetime.now(timezone.utc)
 
@@ -44,9 +55,12 @@ def api_stats():
     stats_30d = aggregate_stats(sessions, start_date=now - timedelta(days=30))
     stats_7d = aggregate_stats(sessions, start_date=now - timedelta(days=7))
 
-    try:
-        code_lines = get_code_lines_stats(claude_dir)
-    except Exception:
+    if source in ("all", "claude"):
+        try:
+            code_lines = get_code_lines_stats(claude_dir)
+        except Exception:
+            code_lines = {"daily": {}, "total": 0, "languages": {}}
+    else:
         code_lines = {"daily": {}, "total": 0, "languages": {}}
 
     stats_all["code_lines"] = code_lines

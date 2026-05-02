@@ -3,6 +3,7 @@
 let statsData = null;
 let currentRange = '7d';
 let currentTab = 'overview';
+let currentSource = 'all';
 let dailyChart = null;
 let realtimeTimer = null;
 let statsTimer = null;
@@ -21,11 +22,24 @@ const MODEL_COLORS = [
 document.addEventListener('DOMContentLoaded', () => {
     setupTabs();
     setupTimeRange();
+    setupSourceSelector();
     fetchStats();
     startStatsPolling();
 
     document.getElementById('detail-back-btn').addEventListener('click', closeSessionDetail);
 });
+
+function setupSourceSelector() {
+    document.querySelectorAll('.source-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            if (btn.dataset.source === currentSource) return;
+            document.querySelectorAll('.source-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentSource = btn.dataset.source;
+            fetchStats();
+        });
+    });
+}
 
 function setupTabs() {
     document.querySelectorAll('.tab').forEach(btn => {
@@ -65,7 +79,7 @@ function setupTimeRange() {
 // ---------- Data Fetching ----------
 async function fetchStats() {
     try {
-        const res = await fetch('/api/stats');
+        const res = await fetch('/api/stats?source=' + encodeURIComponent(currentSource));
         statsData = await res.json();
         if (currentTab !== 'realtime') renderCurrentTab();
     } catch (e) {
