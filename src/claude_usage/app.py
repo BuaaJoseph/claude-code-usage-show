@@ -18,6 +18,7 @@ from claude_usage.parser import (
     get_claude_dir,
     get_codex_dir,
     get_code_lines_stats,
+    get_quota_stats,
     get_session_messages,
 )
 
@@ -72,6 +73,21 @@ def api_stats():
         "30d": stats_30d,
         "7d": stats_7d,
     })
+
+
+@app.route("/api/quota")
+def api_quota():
+    claude_dir = get_claude_dir()
+    try:
+        data = get_quota_stats(claude_dir)
+    except Exception:
+        from claude_usage.parser import _build_quota_response
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        days = now.weekday()
+        week_start = (now - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
+        data = _build_quota_response(0, 0, None, 0, 0, week_start, week_start + timedelta(days=7), now)
+    return jsonify(data)
 
 
 @app.route("/api/realtime")

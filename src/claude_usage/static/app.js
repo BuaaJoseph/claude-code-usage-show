@@ -8,6 +8,15 @@ let dailyChart = null;
 let realtimeTimer = null;
 let statsTimer = null;
 
+// Quota state
+let quotaData = null;
+let quotaTimer = null;
+let quotaCountdownTimer = null;
+// Server-side seconds + client-side elapsed for smooth countdown
+let quota5hSecsRemaining = 0;
+let quotaWeekSecsRemaining = 0;
+let quotaLastFetchMs = 0;
+
 // Store latest realtime session data by session_id for detail view
 const _realtimeSessions = {};
 
@@ -24,7 +33,9 @@ document.addEventListener('DOMContentLoaded', () => {
     setupTimeRange();
     setupSourceSelector();
     fetchStats();
+    fetchQuota();
     startStatsPolling();
+    startQuotaPolling();
 
     document.getElementById('detail-back-btn').addEventListener('click', closeSessionDetail);
 });
@@ -97,6 +108,84 @@ function stopStatsPolling() {
         clearInterval(statsTimer);
         statsTimer = null;
     }
+}
+
+// ---------- Quota ----------
+async function fetchQuota() {
+    try {
+        const res = await fetch('/api/quota');
+        quotaData = await res.json();
+        quotaLastFetchMs = Date.now();
+        quota5hSecsRemaining = quotaData.window_5h.seconds_to_reset;
+        quotaWeekSecsRemaining = quotaData.window_week.seconds_to_reset;
+        renderQuota();
+        startQuotaCountdown();
+    } catch (e) {
+        console.error('Failed to fetch quota:', e);
+    }
+}
+
+function startQuotaPolling() {
+    quotaTimer = setInterval(fetchQuota, 60000);
+}
+
+function startQuotaCountdown() {
+    if (quotaCountdownTimer) clearInterval(quotaCountdownTimer);
+    quotaCountdownTimer = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - quotaLastFetchMs) / 1000);
+        const secs5h = Math.max(0, quota5hSecsRemaining - elapsed);
+        const secsWeek = Math.max(0, quotaWeekSecsRemaining - elapsed);
+
+        const el5h = document.getElementById('quota-5h-reset');
+        const elWeek = document.getElementById('quota-week-reset');
+
+        if (el5h) {
+            if (quotaData && quotaData.window_5h.started_at) {
+                el5h.textContent = secs5h > 0 ? '重置 ' + formatCountdown(secs5h) : '窗口已关闭';
+            } else {
+                el5h.textContent = '无活动';
+            }
+        }
+        if (elWeek) {
+            elWeek.textContent = '重置 ' + formatCountdown(secsWeek);
+        }
+    }, 1000);
+}
+
+function renderQuota() {
+    if (!quotaData) return;
+
+    const w5h = quotaData.window_5h;
+    const wk = quotaData.window_week;
+
+    // Tokens
+    const el5hTok = document.getElementById('quota-5h-tokens');
+    const elWkTok = document.getElementById('quota-week-tokens');
+    if (el5hTok) el5hTok.textContent = formatTokens(w5h.total_tokens);
+    if (elWkTok) elWkTok.textContent = formatTokens(wk.total_tokens);
+
+    // Bars represent fraction of time elapsed in each window (not token %)
+    const elapsed5hFrac = w5h.started_at
+        ? Math.min(1, (Date.now() - new Date(w5h.started_at).getTime()) / (5 * 3600 * 1000))
+        : 0;
+    const bar5h = document.getElementById('quota-5h-bar');
+    if (bar5h) bar5h.style.width = (elapsed5hFrac * 100).toFixed(1) + '%';
+
+    const elapsedWeekFrac = Math.min(1, Math.max(0, 1 - wk.seconds_to_reset / (7 * 24 * 3600)));
+    const barWk = document.getElementById('quota-week-bar');
+    if (barWk) barWk.style.width = (elapsedWeekFrac * 100).toFixed(1) + '%';
+}
+
+function formatCountdown(secs) {
+    if (secs <= 0) return '0s';
+    const d = Math.floor(secs / 86400);
+    const h = Math.floor((secs % 86400) / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    if (d > 0) return `${d}d ${h}h ${m}m`;
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
 }
 
 async function fetchRealtime() {

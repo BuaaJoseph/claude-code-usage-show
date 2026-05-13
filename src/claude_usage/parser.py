@@ -3,7 +3,7 @@
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from collections import defaultdict
 from pathlib import Path
@@ -875,4 +875,138 @@ def get_code_lines_stats(claude_dir: Optional[Path] = None) -> dict:
         "daily": daily,
         "total": grand_total,
         "languages": langs_total,
+    }
+
+
+def get_quota_stats(claude_dir: Optional[Path] = None) -> dict:
+    """Return per-assistant-request token usage for the current 5-hour window and current week.
+
+    The 5-hour window is a rolling window: it starts at the timestamp of the first
+    request found within the most recent 5-hour block, and resets 5 hours after that.
+    The weekly window spans Monday 00:00 UTC → next Monday 00:00 UTC.
+    """
+    if claude_dir is None:
+        claude_dir = get_claude_dir()
+
+    now = datetime.now(timezone.utc)
+    five_h_ago = now - timedelta(hours=5)
+
+    days_since_monday = now.weekday()  # 0 = Monday
+    week_start = (now - timedelta(days=days_since_monday)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    next_week_start = week_start + timedelta(days=7)
+
+    tokens_5h_in = 0
+    tokens_5h_out = 0
+    tokens_week_in = 0
+    tokens_week_out = 0
+    earliest_5h_ts: Optional[datetime] = None
+
+    seen_request_ids: set[str] = set()
+
+    projects_dir = claude_dir / "projects"
+    if not projects_dir.exists():
+        return _build_quota_response(
+            0, 0, None, 0, 0, week_start, next_week_start, now
+        )
+
+    for jsonl_file in projects_dir.rglob("*.jsonl"):
+        # Skip files that haven't been touched since the start of the week
+        try:
+            mtime = datetime.fromtimestamp(jsonl_file.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            continue
+        if mtime < week_start:
+            continue
+
+        try:
+            with open(jsonl_file, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if record.get("type") != "assistant":
+                        continue
+
+                    ts_str = record.get("timestamp", "")
+                    if not ts_str:
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+
+                    if ts < week_start:
+                        continue
+
+                    request_id = record.get("requestId", "")
+                    if request_id:
+                        if request_id in seen_request_ids:
+                            continue
+                        seen_request_ids.add(request_id)
+
+                    msg = record.get("message", {})
+                    if msg.get("model") == "<synthetic>":
+                        continue
+
+                    usage = msg.get("usage", {})
+                    in_t = (
+                        (usage.get("input_tokens") or 0)
+                        + (usage.get("cache_creation_input_tokens") or 0)
+                        + (usage.get("cache_read_input_tokens") or 0)
+                    )
+                    out_t = usage.get("output_tokens") or 0
+
+                    tokens_week_in += in_t
+                    tokens_week_out += out_t
+
+                    if ts >= five_h_ago:
+                        tokens_5h_in += in_t
+                        tokens_5h_out += out_t
+                        if earliest_5h_ts is None or ts < earliest_5h_ts:
+                            earliest_5h_ts = ts
+        except (IOError, OSError):
+            continue
+
+    return _build_quota_response(
+        tokens_5h_in, tokens_5h_out, earliest_5h_ts,
+        tokens_week_in, tokens_week_out,
+        week_start, next_week_start, now,
+    )
+
+
+def _build_quota_response(
+    tokens_5h_in: int, tokens_5h_out: int, earliest_5h_ts: Optional[datetime],
+    tokens_week_in: int, tokens_week_out: int,
+    week_start: datetime, next_week_start: datetime, now: datetime,
+) -> dict:
+    reset_5h: Optional[datetime] = (
+        earliest_5h_ts + timedelta(hours=5) if earliest_5h_ts else None
+    )
+    secs_to_5h = max(0, int((reset_5h - now).total_seconds())) if reset_5h and reset_5h > now else 0
+    secs_to_week = max(0, int((next_week_start - now).total_seconds()))
+
+    return {
+        "window_5h": {
+            "input_tokens": tokens_5h_in,
+            "output_tokens": tokens_5h_out,
+            "total_tokens": tokens_5h_in + tokens_5h_out,
+            "started_at": earliest_5h_ts.isoformat() if earliest_5h_ts else None,
+            "resets_at": reset_5h.isoformat() if reset_5h else None,
+            "seconds_to_reset": secs_to_5h,
+        },
+        "window_week": {
+            "input_tokens": tokens_week_in,
+            "output_tokens": tokens_week_out,
+            "total_tokens": tokens_week_in + tokens_week_out,
+            "started_at": week_start.isoformat(),
+            "resets_at": next_week_start.isoformat(),
+            "seconds_to_reset": secs_to_week,
+        },
     }
