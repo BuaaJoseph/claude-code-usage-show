@@ -21,6 +21,7 @@ from claude_usage.parser import (
     get_codex_dir,
     get_quota_stats,
 )
+from claude_usage.anthropic_quota import fetch_anthropic_quota
 
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     _static = os.path.join(sys._MEIPASS, "claude_usage", "static")
@@ -65,26 +66,126 @@ def api_stats():
     return jsonify({"all": stats_all, "30d": stats_30d, "7d": stats_7d})
 
 
+def _empty_quota(now):
+    empty_window = {
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_creation_tokens": 0, "cache_read_tokens": 0,
+        "total_tokens": 0, "started_at": None,
+    }
+    week_reset = (now + timedelta(days=7)).isoformat()
+    return {
+        "window_5h": {**empty_window, "resets_at": None, "seconds_to_reset": 0},
+        "window_week": {**empty_window, "resets_at": week_reset, "seconds_to_reset": 7 * 86400},
+        "window_week_sonnet": {
+            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+            "started_at": None, "resets_at": week_reset, "seconds_to_reset": 7 * 86400,
+        },
+    }
+
+
+def _overlay_server_window(local_window, server_window, now_unix):
+    """Mutate `local_window` in place so its percentage and reset come from Anthropic.
+
+    The local-JSONL fields (input_tokens / output_tokens / total_tokens /
+    started_at) stay untouched so the dashboard can still display the raw
+    token spend tallied from disk. The percentage field `server_percentage`
+    is added (a float 0-100) which the frontend prefers over the
+    tokens-vs-cap-heuristic when present, and the `resets_at` / `seconds_to_reset`
+    fields are overwritten with Anthropic's authoritative timestamps.
+    Returns True iff at least one field was overlaid.
+    """
+    if not isinstance(local_window, dict) or not isinstance(server_window, dict):
+        return False
+    touched = False
+    pct = server_window.get("used_percentage")
+    if isinstance(pct, (int, float)):
+        local_window["server_percentage"] = float(pct)
+        touched = True
+    reset_unix = server_window.get("resets_at_unix")
+    if isinstance(reset_unix, (int, float)):
+        reset_dt = datetime.fromtimestamp(int(reset_unix), tz=timezone.utc)
+        local_window["resets_at"] = reset_dt.isoformat()
+        local_window["seconds_to_reset"] = max(0, int(reset_unix - now_unix))
+        touched = True
+    return touched
+
+
 @app.route("/api/quota")
 def api_quota():
+    """Return per-window quota usage.
+
+    The response is always the union of the JSON-shape that
+    `claude_usage.parser.get_quota_stats` produces (which counts non-cached
+    input+output tokens from the local Claude JSONL files) and, when the
+    Anthropic OAuth-usage endpoint is reachable via the bearer in
+    `~/.claude/.credentials.json`, an authoritative `server_percentage` and
+    accurate `resets_at` overlay on each window. A top-level `sources` dict
+    tags which path ("anthropic_oauth_usage" or "local_estimate") supplied
+    the percentage for each window so the frontend can label it.
+
+    The Sonnet-only weekly window (`window_week_sonnet`) is always a local
+    estimate because Anthropic's endpoint does not yet expose a Sonnet-only
+    counter — tracking issue anthropics/claude-code#13585 proposes the key
+    name `quota.weekly_sonnet`, and the `claude_usage.anthropic_quota`
+    module already handles that key if/when it ships. Until then the Sonnet
+    bar reads off the local JSONL filter.
+    """
     claude_dir = get_claude_dir()
+    now_dt = datetime.now(timezone.utc)
     try:
         data = get_quota_stats(claude_dir)
     except Exception:
-        now = datetime.now(timezone.utc)
-        empty_window = {
-            "input_tokens": 0, "output_tokens": 0,
-            "cache_creation_tokens": 0, "cache_read_tokens": 0,
-            "total_tokens": 0, "started_at": None,
-        }
-        data = {
-            "window_5h": {**empty_window, "resets_at": None, "seconds_to_reset": 0},
-            "window_week": {
-                **empty_window,
-                "resets_at": (now + timedelta(days=7)).isoformat(),
-                "seconds_to_reset": 7 * 86400,
-            },
-        }
+        data = _empty_quota(now_dt)
+
+    if "window_week_sonnet" not in data:
+        # Defensive: older parser builds may not have the third bucket. Keep
+        # the response shape stable for the frontend.
+        data["window_week_sonnet"] = _empty_quota(now_dt)["window_week_sonnet"]
+
+    sources = {
+        "five_hour": "local_estimate",
+        "seven_day": "local_estimate",
+        "seven_day_sonnet": "local_estimate",
+    }
+
+    server = None
+    try:
+        server = fetch_anthropic_quota()
+    except Exception:
+        server = None
+
+    if server is not None:
+        now_unix = now_dt.timestamp()
+        if _overlay_server_window(data.get("window_5h"), server.get("five_hour"), now_unix):
+            sources["five_hour"] = "anthropic_oauth_usage"
+        if _overlay_server_window(data.get("window_week"), server.get("seven_day"), now_unix):
+            sources["seven_day"] = "anthropic_oauth_usage"
+        sd_sonnet = server.get("seven_day_sonnet")
+        if sd_sonnet and _overlay_server_window(data.get("window_week_sonnet"), sd_sonnet, now_unix):
+            sources["seven_day_sonnet"] = "anthropic_oauth_usage"
+        sd_opus = server.get("seven_day_opus")
+        if sd_opus is not None:
+            # Surface the Opus percentage if Anthropic ever returns it, even
+            # though the dashboard doesn't have a dedicated Opus bar yet.
+            pct = sd_opus.get("used_percentage")
+            reset_unix = sd_opus.get("resets_at_unix")
+            data["window_week_opus"] = {
+                "server_percentage": float(pct) if isinstance(pct, (int, float)) else None,
+                "resets_at": (
+                    datetime.fromtimestamp(int(reset_unix), tz=timezone.utc).isoformat()
+                    if isinstance(reset_unix, (int, float))
+                    else None
+                ),
+                "seconds_to_reset": (
+                    max(0, int(reset_unix - now_unix))
+                    if isinstance(reset_unix, (int, float))
+                    else 0
+                ),
+            }
+            sources["seven_day_opus"] = "anthropic_oauth_usage"
+        data["server_fetched_at"] = server.get("fetched_at_unix")
+
+    data["sources"] = sources
     return jsonify(data)
 
 

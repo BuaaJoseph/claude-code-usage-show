@@ -739,15 +739,42 @@ def get_code_lines_stats(claude_dir: Optional[Path] = None) -> dict:
 
 
 def get_quota_stats(claude_dir: Optional[Path] = None) -> dict:
-    """Return token usage for the current 5-hour session block and past 7 days.
+    """Compute three rolling-window token tallies from the local Claude JSONL files.
 
-    The 5-hour block is gap-anchored: a new block begins when a message arrives
-    more than 5 hours after the previous block's start timestamp.
+    Returns the dict shape produced by `_build_quota_response`, which contains:
 
-    Token counting uses only input_tokens + output_tokens (non-cached) to match
-    the community-standard interpretation of Anthropic's plan caps:
-      Pro ~44k, Max 5x ~88k, Max 20x ~220k per 5-hour block.
-    Cache tokens are tracked separately and returned for informational display.
+      * `window_5h` — non-cached input+output tokens in the current gap-anchored
+        5-hour session block (Anthropic's "begins at first prompt, resets 5h
+        later" semantics: a new block starts when an assistant message arrives
+        more than 5 hours after the *current block's start* timestamp).
+      * `window_week` — non-cached input+output tokens over the rolling 7-day
+        window, summed across all model families.
+      * `window_week_sonnet` — the same 7-day window restricted to records
+        whose `message.model` contains the substring "sonnet" (case-insensitive).
+        This catches every Sonnet generation — `claude-3-5-sonnet-20240620`,
+        `claude-3-5-sonnet-20241022`, `claude-3-7-sonnet-20250219`,
+        `claude-sonnet-4-20250514`, `claude-sonnet-4-5-20250929`, and the
+        Bedrock/Vertex-prefixed `anthropic.claude-3-5-sonnet-…-v2:0` and
+        `claude-3-5-sonnet@20240620` variants — without enumerating ID strings.
+        The split mirrors Anthropic's Aug-28-2025 weekly headline ("hours of
+        Sonnet" vs "hours of Opus") and the post-Nov-24-2025 Claude.ai web
+        UI which surfaces the same Sonnet-only counter.
+
+    The cache-creation and cache-read token totals are returned alongside for
+    informational display, but the `total_tokens` field used by the frontend's
+    percentage bar is `input_tokens + output_tokens` only — matching the
+    community-standard formula used by ccusage and claude-monitor against the
+    Anthropic 5-hour caps (Pro 44k, Max 5x 88k, Max 20x 220k non-cached I/O
+    tokens per block).
+
+    These numbers are a *local estimate*. The Flask `/api/quota` endpoint
+    layers Anthropic's authoritative percentages on top whenever the OAuth
+    bearer in `~/.claude/.credentials.json` is valid and reachable, via
+    `claude_usage.anthropic_quota.fetch_anthropic_quota`. Anthropic's endpoint
+    does not yet expose a Sonnet-only percentage (tracking ticket
+    anthropics/claude-code#13585 proposes the key name `quota.weekly_sonnet`),
+    so the Sonnet bar in the dashboard reads from this local estimate and is
+    labelled "(est.)" in the UI.
     """
     if claude_dir is None:
         claude_dir = get_claude_dir()
@@ -756,7 +783,7 @@ def get_quota_stats(claude_dir: Optional[Path] = None) -> dict:
     seven_days_ago = now - timedelta(days=7)
 
     seen_request_ids: set[str] = set()
-    all_records: list[tuple] = []  # (ts, in_t, out_t, cache_c, cache_r)
+    all_records: list[tuple] = []  # (ts, model, in_t, out_t, cache_c, cache_r)
 
     projects_dir = claude_dir / "projects"
     if not projects_dir.exists():
@@ -796,15 +823,15 @@ def get_quota_stats(claude_dir: Optional[Path] = None) -> dict:
                             continue
                         seen_request_ids.add(request_id)
                     msg = record.get("message", {})
-                    if msg.get("model") == "<synthetic>":
+                    model = msg.get("model") or ""
+                    if model == "<synthetic>":
                         continue
                     usage = msg.get("usage", {})
-                    # Only non-cached tokens count toward the plan quota percentage
                     in_t = usage.get("input_tokens") or 0
                     out_t = usage.get("output_tokens") or 0
                     cache_c = usage.get("cache_creation_input_tokens") or 0
                     cache_r = usage.get("cache_read_input_tokens") or 0
-                    all_records.append((ts, in_t, out_t, cache_c, cache_r))
+                    all_records.append((ts, model, in_t, out_t, cache_c, cache_r))
         except (IOError, OSError):
             continue
 
@@ -812,34 +839,36 @@ def get_quota_stats(claude_dir: Optional[Path] = None) -> dict:
 
 
 def _build_quota_response(records: list, now: datetime) -> dict:
-    """Compute 5-hour session-block and 7-day rolling window stats."""
+    """Aggregate `(ts, model, in_t, out_t, cache_c, cache_r)` tuples into the response."""
     records_sorted = sorted(records, key=lambda x: x[0])
 
-    # 5-hour session block: a new block starts when a message arrives >5h after
-    # the previous block's START (not the previous message). This matches how
-    # Anthropic anchors the window: "starts at first prompt, resets 5h later".
     block_start: Optional[datetime] = None
-    for (ts, *_) in records_sorted:
+    for rec in records_sorted:
+        ts = rec[0]
         if block_start is None or (ts - block_start).total_seconds() > 3600 * 5:
             block_start = ts
 
     fh_in = fh_out = fh_cache_c = fh_cache_r = 0
-    if block_start:
-        for (ts, in_t, out_t, cache_c, cache_r) in records_sorted:
+    if block_start is not None:
+        for (ts, _model, in_t, out_t, cache_c, cache_r) in records_sorted:
             if ts >= block_start:
                 fh_in += in_t
                 fh_out += out_t
                 fh_cache_c += cache_c
                 fh_cache_r += cache_r
+    fh_resets_at: Optional[datetime] = (
+        block_start + timedelta(hours=5) if block_start is not None else None
+    )
+    fh_secs = (
+        max(0, int((fh_resets_at - now).total_seconds()))
+        if fh_resets_at is not None and fh_resets_at > now
+        else 0
+    )
 
-    fh_resets_at: Optional[datetime] = block_start + timedelta(hours=5) if block_start else None
-    fh_secs = max(0, int((fh_resets_at - now).total_seconds())) if fh_resets_at and fh_resets_at > now else 0
-
-    # Rolling 7-day window
     seven_days_ago = now - timedelta(days=7)
     wk_in = wk_out = wk_cache_c = wk_cache_r = 0
     oldest_wk_ts: Optional[datetime] = None
-    for (ts, in_t, out_t, cache_c, cache_r) in records_sorted:
+    for (ts, _model, in_t, out_t, cache_c, cache_r) in records_sorted:
         if ts >= seven_days_ago:
             wk_in += in_t
             wk_out += out_t
@@ -847,9 +876,23 @@ def _build_quota_response(records: list, now: datetime) -> dict:
             wk_cache_r += cache_r
             if oldest_wk_ts is None:
                 oldest_wk_ts = ts
-
-    wk_resets_at: datetime = oldest_wk_ts + timedelta(days=7) if oldest_wk_ts else now + timedelta(days=7)
+    wk_resets_at: datetime = (
+        oldest_wk_ts + timedelta(days=7) if oldest_wk_ts is not None else now + timedelta(days=7)
+    )
     wk_secs = max(0, int((wk_resets_at - now).total_seconds()))
+
+    son_in = son_out = 0
+    oldest_son_ts: Optional[datetime] = None
+    for (ts, model, in_t, out_t, _cc, _cr) in records_sorted:
+        if ts >= seven_days_ago and isinstance(model, str) and "sonnet" in model.lower():
+            son_in += in_t
+            son_out += out_t
+            if oldest_son_ts is None:
+                oldest_son_ts = ts
+    son_resets_at: datetime = (
+        oldest_son_ts + timedelta(days=7) if oldest_son_ts is not None else now + timedelta(days=7)
+    )
+    son_secs = max(0, int((son_resets_at - now).total_seconds()))
 
     return {
         "window_5h": {
@@ -858,8 +901,8 @@ def _build_quota_response(records: list, now: datetime) -> dict:
             "cache_creation_tokens": fh_cache_c,
             "cache_read_tokens": fh_cache_r,
             "total_tokens": fh_in + fh_out,
-            "started_at": block_start.isoformat() if block_start else None,
-            "resets_at": fh_resets_at.isoformat() if fh_resets_at else None,
+            "started_at": block_start.isoformat() if block_start is not None else None,
+            "resets_at": fh_resets_at.isoformat() if fh_resets_at is not None else None,
             "seconds_to_reset": fh_secs,
         },
         "window_week": {
@@ -868,8 +911,16 @@ def _build_quota_response(records: list, now: datetime) -> dict:
             "cache_creation_tokens": wk_cache_c,
             "cache_read_tokens": wk_cache_r,
             "total_tokens": wk_in + wk_out,
-            "started_at": oldest_wk_ts.isoformat() if oldest_wk_ts else None,
+            "started_at": oldest_wk_ts.isoformat() if oldest_wk_ts is not None else None,
             "resets_at": wk_resets_at.isoformat(),
             "seconds_to_reset": wk_secs,
+        },
+        "window_week_sonnet": {
+            "input_tokens": son_in,
+            "output_tokens": son_out,
+            "total_tokens": son_in + son_out,
+            "started_at": oldest_son_ts.isoformat() if oldest_son_ts is not None else None,
+            "resets_at": son_resets_at.isoformat(),
+            "seconds_to_reset": son_secs,
         },
     }

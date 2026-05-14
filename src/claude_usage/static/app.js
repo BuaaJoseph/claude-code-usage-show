@@ -8,19 +8,40 @@ let dailyChart = null;
 let realtimeTimer = null;
 let statsTimer = null;
 
-// Quota / Plan Usage state
+// Quota / Plan Usage state. The countdown ticks live every second from
+// these per-window "seconds remaining at last fetch" snapshots so the bar
+// labels keep counting down between the 60s polling cycles.
 let quotaData = null;
 let quotaTimer = null;
 let quotaCountdownTimer = null;
 let quota5hSecsRemaining = 0;
 let quotaWeekSecsRemaining = 0;
+let quotaWeekSonnetSecsRemaining = 0;
 let quotaLastFetchMs = 0;
 
-// Plan tier caps (non-cached tokens per 5h block / per week)
+// Per-plan denominators used only when Anthropic's /api/oauth/usage endpoint
+// is unreachable and the percentage has to be heuristically estimated from
+// the raw JSONL token tally. Numbers come from the Aug-28-2025 Anthropic
+// rate-limit announcement ("hours of Sonnet per week") at the upper end of
+// the published range, converted through the per-plan 5-hour cap:
+//   weekly_tokens = (sonnet_hours_per_week * five_hour_token_cap) / 5h
+// Pro:    80h × (44k / 5h)   =   704,000 non-cached I/O tokens / week
+// Max5:  280h × (88k / 5h)   = 4,928,000
+// Max20: 480h × (220k / 5h)  = 21,120,000
+// The Sonnet-specific cap matches the all-models cap because the Anthropic
+// announcement frames the weekly headline limit in Sonnet-hours; Opus has
+// its own much smaller weekly bucket which the dashboard tracks separately
+// when /api/oauth/usage exposes a `seven_day_opus` field.
+//
+// References for these constants:
+//   - https://www.anthropic.com/news/updated-rate-limits-for-claude-code
+//   - https://support.claude.com/en/articles/14552983-models-usage-and-limits-in-claude-code
+//   - https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor (5-hour caps)
+//   - https://github.com/ryoppippi/ccusage (non-cached input+output formula)
 const PLAN_CAPS = {
-    pro:   { five_h: 44000,   weekly: 440000 },
-    max5:  { five_h: 88000,   weekly: 880000 },
-    max20: { five_h: 220000,  weekly: 2200000 },
+    pro:   { five_h: 44000,   weekly: 704000,    weekly_sonnet: 704000 },
+    max5:  { five_h: 88000,   weekly: 4928000,   weekly_sonnet: 4928000 },
+    max20: { five_h: 220000,  weekly: 21120000,  weekly_sonnet: 21120000 },
 };
 
 function getCurrentPlanCap() {
@@ -28,10 +49,8 @@ function getCurrentPlanCap() {
     return PLAN_CAPS[plan] || PLAN_CAPS.max5;
 }
 
-// Store latest realtime session data by session_id for detail view
 const _realtimeSessions = {};
 
-// Color palette for models
 const MODEL_COLORS = [
     '#4a9eff', '#6366f1', '#a78bfa', '#818cf8',
     '#38bdf8', '#22d3ee', '#2dd4bf', '#34d399',
@@ -85,7 +104,7 @@ function setupTabs() {
             document.getElementById('tab-' + currentTab).classList.add('active');
 
             const trg = document.getElementById('timeRangeGroup');
-            trg.style.display = currentTab === 'realtime' ? 'none' : 'flex';
+            if (trg) trg.style.display = currentTab === 'realtime' ? 'none' : 'flex';
 
             const sourceSelector = document.getElementById('sourceSelector');
             const sourceIndicator = document.getElementById('sourceIndicator');
@@ -144,8 +163,9 @@ async function fetchQuota() {
         const res = await fetch('/api/quota');
         quotaData = await res.json();
         quotaLastFetchMs = Date.now();
-        quota5hSecsRemaining = quotaData.window_5h.seconds_to_reset;
-        quotaWeekSecsRemaining = quotaData.window_week.seconds_to_reset;
+        quota5hSecsRemaining = _safeSeconds(quotaData.window_5h);
+        quotaWeekSecsRemaining = _safeSeconds(quotaData.window_week);
+        quotaWeekSonnetSecsRemaining = _safeSeconds(quotaData.window_week_sonnet);
         renderPlanUsage();
         startPlanCountdown();
     } catch (e) {
@@ -153,7 +173,14 @@ async function fetchQuota() {
     }
 }
 
+function _safeSeconds(window) {
+    if (!window) return 0;
+    const s = window.seconds_to_reset;
+    return (typeof s === 'number' && Number.isFinite(s) && s > 0) ? s : 0;
+}
+
 function startQuotaPolling() {
+    if (quotaTimer) clearInterval(quotaTimer);
     quotaTimer = setInterval(fetchQuota, 60000);
 }
 
@@ -162,28 +189,73 @@ function startPlanCountdown() {
     quotaCountdownTimer = setInterval(updatePlanInfoText, 1000);
 }
 
+// Source of percentage truth: when /api/quota's overlay step found an
+// `Anthropic /api/oauth/usage` reading for this window, the server stamped a
+// `server_percentage` (0-100 float) on the window object. Prefer that over
+// the local tokens/cap heuristic, which is only meaningful as a fallback.
+function _windowPercent(windowObj, capTokens) {
+    if (!windowObj) return 0;
+    const sp = windowObj.server_percentage;
+    if (typeof sp === 'number' && Number.isFinite(sp)) {
+        return Math.max(0, Math.min(100, Math.round(sp)));
+    }
+    const tokens = windowObj.total_tokens || 0;
+    if (tokens <= 0 || !capTokens) return 0;
+    return Math.min(100, Math.round((tokens / capTokens) * 100));
+}
+
+function _windowIsAuthoritative(sources, key) {
+    return sources && sources[key] === 'anthropic_oauth_usage';
+}
+
+function _suffix(sources, key) {
+    return _windowIsAuthoritative(sources, key) ? '' : ' (est.)';
+}
+
 function renderPlanUsage() {
     if (!quotaData) return;
-    const w5h = quotaData.window_5h;
-    const wk = quotaData.window_week;
+    const w5h = quotaData.window_5h || {};
+    const wk = quotaData.window_week || {};
+    const ws = quotaData.window_week_sonnet || null;
     const cap = getCurrentPlanCap();
+    const sources = quotaData.sources || {};
 
-    const pct5h = w5h.total_tokens > 0
-        ? Math.min(100, Math.round(w5h.total_tokens / cap.five_h * 100))
-        : 0;
-    const pctWk = wk.total_tokens > 0
-        ? Math.min(100, Math.round(wk.total_tokens / cap.weekly * 100))
-        : 0;
+    const pct5h = _windowPercent(w5h, cap.five_h);
+    const pctWk = _windowPercent(wk, cap.weekly);
+    const pctWs = ws ? _windowPercent(ws, cap.weekly_sonnet) : 0;
 
     const bar5h = document.getElementById('plan-5h-bar');
     const barWk = document.getElementById('plan-week-bar');
+    const barWs = document.getElementById('plan-week-sonnet-bar');
     if (bar5h) bar5h.style.width = pct5h + '%';
     if (barWk) barWk.style.width = pctWk + '%';
+    if (barWs) barWs.style.width = pctWs + '%';
 
     const el5hTok = document.getElementById('plan-5h-tokens');
     const elWkTok = document.getElementById('plan-week-tokens');
-    if (el5hTok) el5hTok.textContent = formatTokens(w5h.total_tokens);
-    if (elWkTok) elWkTok.textContent = formatTokens(wk.total_tokens);
+    const elWsTok = document.getElementById('plan-week-sonnet-tokens');
+    if (el5hTok) el5hTok.textContent = formatTokens(w5h.total_tokens || 0);
+    if (elWkTok) elWkTok.textContent = formatTokens(wk.total_tokens || 0);
+    if (elWsTok) elWsTok.textContent = ws ? formatTokens(ws.total_tokens || 0) : '0';
+
+    const tag = document.getElementById('plan-source-tag');
+    if (tag) {
+        const fhAuth = _windowIsAuthoritative(sources, 'five_hour');
+        const sdAuth = _windowIsAuthoritative(sources, 'seven_day');
+        const sonAuth = _windowIsAuthoritative(sources, 'seven_day_sonnet');
+        if (fhAuth || sdAuth || sonAuth) {
+            const live = [
+                fhAuth ? '5h' : null,
+                sdAuth ? 'weekly' : null,
+                sonAuth ? 'sonnet' : null,
+            ].filter(Boolean).join(' + ');
+            tag.textContent = 'Live: Anthropic /usage (' + live + '). Other rows are local-JSONL estimates.';
+            tag.classList.add('live');
+        } else {
+            tag.textContent = 'Local-JSONL estimate (no OAuth bearer at ~/.claude/.credentials.json or endpoint unreachable). Numbers compared to the Anthropic Aug-28-2025 hours-of-Sonnet upper bound per the selected plan tier.';
+            tag.classList.remove('live');
+        }
+    }
 
     updatePlanInfoText();
 }
@@ -193,32 +265,44 @@ function updatePlanInfoText() {
     const elapsed = Math.floor((Date.now() - quotaLastFetchMs) / 1000);
     const secs5h = Math.max(0, quota5hSecsRemaining - elapsed);
     const secsWk = Math.max(0, quotaWeekSecsRemaining - elapsed);
+    const secsWs = Math.max(0, quotaWeekSonnetSecsRemaining - elapsed);
 
-    const w5h = quotaData.window_5h;
-    const wk = quotaData.window_week;
+    const w5h = quotaData.window_5h || {};
+    const wk = quotaData.window_week || {};
+    const ws = quotaData.window_week_sonnet || null;
+    const sources = quotaData.sources || {};
     const cap = getCurrentPlanCap();
 
-    const pct5h = w5h.total_tokens > 0
-        ? Math.min(100, Math.round(w5h.total_tokens / cap.five_h * 100))
-        : 0;
-    const pctWk = wk.total_tokens > 0
-        ? Math.min(100, Math.round(wk.total_tokens / cap.weekly * 100))
-        : 0;
+    const pct5h = _windowPercent(w5h, cap.five_h);
+    const pctWk = _windowPercent(wk, cap.weekly);
+    const pctWs = ws ? _windowPercent(ws, cap.weekly_sonnet) : 0;
 
     const info5h = document.getElementById('plan-5h-info');
     const infoWk = document.getElementById('plan-week-info');
+    const infoWs = document.getElementById('plan-week-sonnet-info');
 
     if (info5h) {
-        if (w5h.started_at) {
-            const resetStr = secs5h > 0 ? 'resets ' + formatCountdown(secs5h) : 'window closed';
-            info5h.textContent = pct5h + '% · ' + resetStr;
+        const authoritative = _windowIsAuthoritative(sources, 'five_hour');
+        const hasStart = authoritative || !!w5h.started_at;
+        if (hasStart) {
+            const reset = secs5h > 0 ? 'resets ' + formatCountdown(secs5h) : 'window closed';
+            info5h.textContent = pct5h + '% · ' + reset + (authoritative ? '' : ' (est.)');
         } else {
-            info5h.textContent = '0% · no activity';
+            info5h.textContent = '0% · no activity (est.)';
         }
     }
     if (infoWk) {
-        const resetStr = 'resets ' + formatCountdown(secsWk);
-        infoWk.textContent = pctWk + '% · ' + resetStr;
+        const reset = secsWk > 0 ? 'resets ' + formatCountdown(secsWk) : 'window closed';
+        infoWk.textContent = pctWk + '% · ' + reset + _suffix(sources, 'seven_day');
+    }
+    if (infoWs) {
+        const reset = secsWs > 0 ? 'resets ' + formatCountdown(secsWs) : 'window closed';
+        const hasAny = ws && (ws.total_tokens > 0 || pctWs > 0 || _windowIsAuthoritative(sources, 'seven_day_sonnet'));
+        if (hasAny) {
+            infoWs.textContent = pctWs + '% · ' + reset + _suffix(sources, 'seven_day_sonnet');
+        } else {
+            infoWs.textContent = '0% · no Sonnet activity (est.)';
+        }
     }
 }
 
