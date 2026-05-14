@@ -18,6 +18,11 @@
 </head>
 <body>
     <div class="dashboard">
+        <div class="source-selector" id="sourceSelector">
+            <button class="source-btn active" data-source="all">All</button>
+            <button class="source-btn" data-source="claude">Claude Code</button>
+            <button class="source-btn" data-source="codex">Codex</button>
+        </div>
         <div class="card main-card">
             <!-- Tabs and Time Range -->
             <div class="controls">
@@ -36,39 +41,58 @@
 
             <!-- Overview Tab -->
             <div class="tab-content active" id="tab-overview">
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-label">Sessions</div>
-                        <div class="stat-value" id="stat-sessions">-</div>
+                <div class="overview-layout">
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-label">Sessions</div>
+                            <div class="stat-value" id="stat-sessions">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">消息数</div>
+                            <div class="stat-value" id="stat-messages">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Total tokens</div>
+                            <div class="stat-value" id="stat-tokens">-</div>
+                            <div class="stat-sub" id="stat-tokens-detail"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">活跃天数</div>
+                            <div class="stat-value" id="stat-active-days">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">当前连续</div>
+                            <div class="stat-value" id="stat-current-streak">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">最长连续</div>
+                            <div class="stat-value" id="stat-longest-streak">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">高峰时段</div>
+                            <div class="stat-value" id="stat-peak-hour">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">常用模型</div>
+                            <div class="stat-value small" id="stat-favorite-model">-</div>
+                        </div>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-label">消息数</div>
-                        <div class="stat-value" id="stat-messages">-</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Total tokens</div>
-                        <div class="stat-value" id="stat-tokens">-</div>
-                        <div class="stat-sub" id="stat-tokens-detail"></div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">活跃天数</div>
-                        <div class="stat-value" id="stat-active-days">-</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">当前连续</div>
-                        <div class="stat-value" id="stat-current-streak">-</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">最长连续</div>
-                        <div class="stat-value" id="stat-longest-streak">-</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">高峰时段</div>
-                        <div class="stat-value" id="stat-peak-hour">-</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">常用模型</div>
-                        <div class="stat-value small" id="stat-favorite-model">-</div>
+                    <div class="plan-usage-card">
+                        <div class="plan-usage-header">Plan usage</div>
+                        <div class="plan-row">
+                            <div class="plan-row-label">5-hour limit</div>
+                            <div class="plan-row-bar-wrap"><div class="plan-row-bar" id="plan-5h-bar"></div></div>
+                            <div class="plan-row-info" id="plan-5h-info">-</div>
+                        </div>
+                        <div class="plan-row">
+                            <div class="plan-row-label">Weekly · all models</div>
+                            <div class="plan-row-bar-wrap"><div class="plan-row-bar" id="plan-week-bar"></div></div>
+                            <div class="plan-row-info" id="plan-week-info">-</div>
+                        </div>
+                        <div class="plan-tokens-summary">
+                            <span>5h: <strong id="plan-5h-tokens">-</strong></span>
+                            <span>Week: <strong id="plan-week-tokens">-</strong></span>
+                        </div>
                     </div>
                 </div>
 

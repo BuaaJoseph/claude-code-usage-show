@@ -3,9 +3,22 @@
 let statsData = null;
 let currentRange = '7d';
 let currentTab = 'overview';
+let currentSource = 'all';
 let dailyChart = null;
 let realtimeTimer = null;
 let statsTimer = null;
+
+// Quota / Plan Usage state
+let quotaData = null;
+let quotaTimer = null;
+let quotaCountdownTimer = null;
+let quota5hSecsRemaining = 0;
+let quotaWeekSecsRemaining = 0;
+let quotaLastFetchMs = 0;
+
+// Estimated plan limits for percentage display
+const PLAN_5H_LIMIT = 88000;
+const PLAN_WEEK_LIMIT = 880000;
 
 // Store latest realtime session data by session_id for detail view
 const _realtimeSessions = {};
@@ -21,11 +34,26 @@ const MODEL_COLORS = [
 document.addEventListener('DOMContentLoaded', () => {
     setupTabs();
     setupTimeRange();
+    setupSourceSelector();
     fetchStats();
+    fetchQuota();
     startStatsPolling();
+    startQuotaPolling();
 
     document.getElementById('detail-back-btn').addEventListener('click', closeSessionDetail);
 });
+
+function setupSourceSelector() {
+    document.querySelectorAll('.source-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            if (btn.dataset.source === currentSource) return;
+            document.querySelectorAll('.source-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentSource = btn.dataset.source;
+            fetchStats();
+        });
+    });
+}
 
 function setupTabs() {
     document.querySelectorAll('.tab').forEach(btn => {
@@ -36,7 +64,6 @@ function setupTabs() {
             currentTab = btn.dataset.tab;
             document.getElementById('tab-' + currentTab).classList.add('active');
 
-            // Show/hide time range for realtime tab
             const trg = document.getElementById('timeRangeGroup');
             trg.style.display = currentTab === 'realtime' ? 'none' : 'flex';
 
@@ -65,7 +92,7 @@ function setupTimeRange() {
 // ---------- Data Fetching ----------
 async function fetchStats() {
     try {
-        const res = await fetch('/api/stats');
+        const res = await fetch('/api/stats?source=' + encodeURIComponent(currentSource));
         statsData = await res.json();
         if (currentTab !== 'realtime') renderCurrentTab();
     } catch (e) {
@@ -85,11 +112,104 @@ function stopStatsPolling() {
     }
 }
 
+// ---------- Quota / Plan Usage ----------
+async function fetchQuota() {
+    try {
+        const res = await fetch('/api/quota');
+        quotaData = await res.json();
+        quotaLastFetchMs = Date.now();
+        quota5hSecsRemaining = quotaData.window_5h.seconds_to_reset;
+        quotaWeekSecsRemaining = quotaData.window_week.seconds_to_reset;
+        renderPlanUsage();
+        startPlanCountdown();
+    } catch (e) {
+        console.error('Failed to fetch quota:', e);
+    }
+}
+
+function startQuotaPolling() {
+    quotaTimer = setInterval(fetchQuota, 60000);
+}
+
+function startPlanCountdown() {
+    if (quotaCountdownTimer) clearInterval(quotaCountdownTimer);
+    quotaCountdownTimer = setInterval(updatePlanInfoText, 1000);
+}
+
+function renderPlanUsage() {
+    if (!quotaData) return;
+    const w5h = quotaData.window_5h;
+    const wk = quotaData.window_week;
+
+    const pct5h = w5h.total_tokens > 0
+        ? Math.min(100, Math.round(w5h.total_tokens / PLAN_5H_LIMIT * 100))
+        : 0;
+    const pctWk = wk.total_tokens > 0
+        ? Math.min(100, Math.round(wk.total_tokens / PLAN_WEEK_LIMIT * 100))
+        : 0;
+
+    const bar5h = document.getElementById('plan-5h-bar');
+    const barWk = document.getElementById('plan-week-bar');
+    if (bar5h) bar5h.style.width = pct5h + '%';
+    if (barWk) barWk.style.width = pctWk + '%';
+
+    const el5hTok = document.getElementById('plan-5h-tokens');
+    const elWkTok = document.getElementById('plan-week-tokens');
+    if (el5hTok) el5hTok.textContent = formatTokens(w5h.total_tokens);
+    if (elWkTok) elWkTok.textContent = formatTokens(wk.total_tokens);
+
+    updatePlanInfoText();
+}
+
+function updatePlanInfoText() {
+    if (!quotaData) return;
+    const elapsed = Math.floor((Date.now() - quotaLastFetchMs) / 1000);
+    const secs5h = Math.max(0, quota5hSecsRemaining - elapsed);
+    const secsWk = Math.max(0, quotaWeekSecsRemaining - elapsed);
+
+    const w5h = quotaData.window_5h;
+    const wk = quotaData.window_week;
+
+    const pct5h = w5h.total_tokens > 0
+        ? Math.min(100, Math.round(w5h.total_tokens / PLAN_5H_LIMIT * 100))
+        : 0;
+    const pctWk = wk.total_tokens > 0
+        ? Math.min(100, Math.round(wk.total_tokens / PLAN_WEEK_LIMIT * 100))
+        : 0;
+
+    const info5h = document.getElementById('plan-5h-info');
+    const infoWk = document.getElementById('plan-week-info');
+
+    if (info5h) {
+        if (w5h.started_at) {
+            const resetStr = secs5h > 0 ? 'resets ' + formatCountdown(secs5h) : 'window closed';
+            info5h.textContent = pct5h + '% · ' + resetStr;
+        } else {
+            info5h.textContent = '0% · no activity';
+        }
+    }
+    if (infoWk) {
+        const resetStr = 'resets ' + formatCountdown(secsWk);
+        infoWk.textContent = pctWk + '% · ' + resetStr;
+    }
+}
+
+function formatCountdown(secs) {
+    if (secs <= 0) return '0s';
+    const d = Math.floor(secs / 86400);
+    const h = Math.floor((secs % 86400) / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    if (d > 0) return `${d}d ${h}h ${m}m`;
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+}
+
 async function fetchRealtime() {
     try {
         const res = await fetch('/api/realtime');
         const data = await res.json();
-        // Cache session data for detail view
         (data.active_sessions || []).forEach(s => {
             if (s.session_id) _realtimeSessions[s.session_id] = s;
         });
@@ -139,19 +259,14 @@ function renderHeatmap(heatmap) {
     const container = document.getElementById('heatmap');
     container.innerHTML = '';
 
-    // Always show last 52 weeks, regardless of filter
     const today = new Date();
     let startDate = new Date(today);
     startDate.setDate(today.getDate() - 7 * 52);
-
-    // Align to Sunday
     startDate.setDate(startDate.getDate() - startDate.getDay());
 
-    // Find max value for color scaling
     const values = Object.values(heatmap).filter(v => v > 0);
     const maxVal = values.length > 0 ? Math.max(...values) : 1;
 
-    // Build weeks
     const d = new Date(startDate);
     while (d <= today) {
         const weekDiv = document.createElement('div');
@@ -187,7 +302,6 @@ function getHeatmapColor(count, maxVal) {
 function renderFunFact(data) {
     const el = document.getElementById('fun-fact');
     if (data.total_tokens > 0) {
-        // Animal Farm is ~100k tokens
         const animalFarmTokens = 100000;
         const multiple = Math.round(data.total_tokens / animalFarmTokens);
         if (multiple > 0) {
@@ -209,7 +323,6 @@ function renderModels(data) {
 function renderDailyChart(dailyTokens) {
     const ctx = document.getElementById('dailyChart').getContext('2d');
 
-    // Collect all dates and models
     const dates = Object.keys(dailyTokens).sort();
     const allModels = new Set();
     dates.forEach(d => {
@@ -217,13 +330,11 @@ function renderDailyChart(dailyTokens) {
     });
     const models = Array.from(allModels);
 
-    // Format date labels
     const labels = dates.map(d => {
         const date = new Date(d + 'T00:00:00');
         return `${date.getMonth() + 1}月${date.getDate()}日`;
     });
 
-    // Build datasets - stacked by model
     const datasets = models.map((model, i) => ({
         label: model,
         data: dates.map(d => {
@@ -243,10 +354,7 @@ function renderDailyChart(dailyTokens) {
         options: {
             responsive: true,
             maintainAspectRatio: false,
-            interaction: {
-                mode: 'index',
-                intersect: false,
-            },
+            interaction: { mode: 'index', intersect: false },
             plugins: {
                 legend: { display: false },
                 tooltip: {
@@ -487,7 +595,7 @@ function renderRealtime(sessions) {
                     <div class="status-dot"></div>
                     <span style="color:#40c463">运行中</span>
                 </div>
-                <button class="session-detail-btn" onclick="openSessionDetail('${s.session_id}')">查看详情 →</button>
+                <button class="session-detail-btn" onclick="openSessionDetail('${s.session_id}')">查看详情 &rarr;</button>
             </div>
             <div class="session-meta">
                 <div class="meta-item">
@@ -551,11 +659,9 @@ function openSessionDetail(sessionId) {
     detailSessionId = sessionId;
     detailOffset = 0;
 
-    // Populate header
     document.getElementById('detail-cwd').textContent = s.cwd || sessionId;
     document.getElementById('detail-model-badge').textContent = s.last_model || '';
 
-    // Show overlay
     document.getElementById('session-detail').classList.add('open');
     document.getElementById('detail-messages').innerHTML = '<div class="detail-loading">加载中...</div>';
 
@@ -599,7 +705,6 @@ async function fetchDetailMessages() {
 function appendDetailMessages(messages) {
     const container = document.getElementById('detail-messages');
 
-    // Remove loading indicator on first batch
     const loading = container.querySelector('.detail-loading');
     if (loading) loading.remove();
 
@@ -628,7 +733,6 @@ function renderUserMessage(msg) {
     const toolResults = content.filter(c => c.type === 'tool_result');
     const textBlocks = content.filter(c => c.type === 'text');
 
-    // Pure tool-result message: render as result blocks only (no user bubble)
     if (toolResults.length > 0 && textBlocks.length === 0) {
         const frag = document.createDocumentFragment();
         toolResults.forEach(tr => {
@@ -657,7 +761,6 @@ function renderUserMessage(msg) {
         row.appendChild(bubble);
     }
 
-    // Mixed tool results in an otherwise text message
     toolResults.forEach(tr => {
         const el = renderToolResult(tr, '');
         if (el) row.appendChild(el);
@@ -721,7 +824,7 @@ function buildThinkingBlock(block) {
 
     const header = document.createElement('div');
     header.className = 'thinking-header';
-    header.innerHTML = `<span>▶</span><span>思考过程</span><span style="margin-left:auto;color:#a5b4fc">${formatNumber(thinking.length)} chars</span>`;
+    header.innerHTML = `<span>&#9658;</span><span>思考过程</span><span style="margin-left:auto;color:#a5b4fc">${formatNumber(thinking.length)} chars</span>`;
 
     const body = document.createElement('div');
     body.className = 'thinking-body';
@@ -757,10 +860,10 @@ function buildToolCall(block) {
     const header = document.createElement('div');
     header.className = 'tool-call-header';
     header.innerHTML = `
-        <span class="tool-icon">🔧</span>
+        <span class="tool-icon">&#128295;</span>
         <span class="tool-name">${escapeHtml(toolName)}</span>
         ${summary ? `<span class="tool-summary">${escapeHtml(summary)}</span>` : ''}
-        <span class="tool-chevron">▶</span>
+        <span class="tool-chevron">&#9658;</span>
     `;
 
     const body = document.createElement('div');
@@ -804,7 +907,7 @@ function renderToolResult(block, timeStr) {
         <span>${icon}</span>
         <span>${label}</span>
         ${timeStr ? `<span style="margin-left:auto;color:#9ca3af">${timeStr}</span>` : ''}
-        <span class="tool-chevron" style="margin-left:${timeStr ? '8px' : 'auto'}">▶</span>
+        <span class="tool-chevron" style="margin-left:${timeStr ? '8px' : 'auto'}">&#9658;</span>
     `;
 
     const body = document.createElement('div');
