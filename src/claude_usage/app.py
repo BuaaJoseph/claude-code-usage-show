@@ -49,7 +49,6 @@ def api_stats():
         sessions.extend(get_all_codex_usage_data(codex_dir)["sessions"])
 
     now = datetime.now(timezone.utc)
-
     stats_all = aggregate_stats(sessions)
     stats_30d = aggregate_stats(sessions, start_date=now - timedelta(days=30))
     stats_7d = aggregate_stats(sessions, start_date=now - timedelta(days=7))
@@ -63,11 +62,7 @@ def api_stats():
     stats_30d["code_lines"] = code_lines
     stats_7d["code_lines"] = code_lines
 
-    return jsonify({
-        "all": stats_all,
-        "30d": stats_30d,
-        "7d": stats_7d,
-    })
+    return jsonify({"all": stats_all, "30d": stats_30d, "7d": stats_7d})
 
 
 @app.route("/api/quota")
@@ -76,11 +71,20 @@ def api_quota():
     try:
         data = get_quota_stats(claude_dir)
     except Exception:
-        from claude_usage.parser import _build_quota_response
         now = datetime.now(timezone.utc)
-        days = now.weekday()
-        week_start = (now - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
-        data = _build_quota_response(0, 0, None, 0, 0, week_start, week_start + timedelta(days=7), now)
+        empty_window = {
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_creation_tokens": 0, "cache_read_tokens": 0,
+            "total_tokens": 0, "started_at": None,
+        }
+        data = {
+            "window_5h": {**empty_window, "resets_at": None, "seconds_to_reset": 0},
+            "window_week": {
+                **empty_window,
+                "resets_at": (now + timedelta(days=7)).isoformat(),
+                "seconds_to_reset": 7 * 86400,
+            },
+        }
     return jsonify(data)
 
 
@@ -88,12 +92,10 @@ def api_quota():
 def api_realtime():
     claude_dir = get_claude_dir()
     active = get_active_sessions(claude_dir)
-
     for s in active:
         for k, v in s.items():
             if isinstance(v, datetime):
                 s[k] = v.isoformat()
-
     return jsonify({"active_sessions": active})
 
 
@@ -108,7 +110,6 @@ def api_session_messages(session_id):
 
 
 def _start_flask(host, port):
-    """Run Flask server in a background thread."""
     app.run(host=host, port=port, debug=False, use_reloader=False)
 
 
@@ -123,7 +124,7 @@ def main():
         parser.add_argument("--port", type=int, default=8907)
         parser.add_argument("--host", type=str, default="127.0.0.1")
         parser.add_argument("--no-browser", action="store_true")
-        parser.add_argument("--browser", action="store_true", help="Force open in browser instead of native window")
+        parser.add_argument("--browser", action="store_true", help="Force open in browser")
         args = parser.parse_args()
         host = args.host
         port = args.port
@@ -138,7 +139,6 @@ def main():
             import webview
             server_thread = threading.Thread(target=_start_flask, args=(host, port), daemon=True)
             server_thread.start()
-
             import time
             import urllib.request
             for _ in range(50):
@@ -147,14 +147,7 @@ def main():
                     break
                 except Exception:
                     time.sleep(0.1)
-
-            webview.create_window(
-                "Claude Code Usage",
-                url,
-                width=1024,
-                height=768,
-                min_size=(800, 600),
-            )
+            webview.create_window("Claude Code Usage", url, width=1024, height=768, min_size=(800, 600))
             webview.start()
             return
         except ImportError:
@@ -165,7 +158,6 @@ def main():
 
     print(f"\n  Claude Code Usage Dashboard")
     print(f"  {url}\n")
-
     app.run(host=host, port=port, debug=False)
 
 
