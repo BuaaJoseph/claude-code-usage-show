@@ -17,6 +17,9 @@ from claude_usage.parser import (
     get_claude_dir,
     get_code_lines_stats,
     get_session_messages,
+    get_all_codex_usage_data,
+    get_codex_dir,
+    get_quota_stats,
 )
 
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -34,9 +37,16 @@ def index():
 
 @app.route("/api/stats")
 def api_stats():
+    source = request.args.get("source", "all")
+    if source not in ("all", "claude", "codex"):
+        source = "all"
     claude_dir = get_claude_dir()
-    data = get_all_usage_data(claude_dir)
-    sessions = data["sessions"]
+    codex_dir = get_codex_dir()
+    sessions: list = []
+    if source in ("all", "claude"):
+        sessions.extend(get_all_usage_data(claude_dir)["sessions"])
+    if source in ("all", "codex"):
+        sessions.extend(get_all_codex_usage_data(codex_dir)["sessions"])
 
     now = datetime.now(timezone.utc)
 
@@ -58,6 +68,20 @@ def api_stats():
         "30d": stats_30d,
         "7d": stats_7d,
     })
+
+
+@app.route("/api/quota")
+def api_quota():
+    claude_dir = get_claude_dir()
+    try:
+        data = get_quota_stats(claude_dir)
+    except Exception:
+        from claude_usage.parser import _build_quota_response
+        now = datetime.now(timezone.utc)
+        days = now.weekday()
+        week_start = (now - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
+        data = _build_quota_response(0, 0, None, 0, 0, week_start, week_start + timedelta(days=7), now)
+    return jsonify(data)
 
 
 @app.route("/api/realtime")
@@ -112,11 +136,9 @@ def main():
     if use_native:
         try:
             import webview
-            # Start Flask in background thread
             server_thread = threading.Thread(target=_start_flask, args=(host, port), daemon=True)
             server_thread.start()
 
-            # Wait for server to be ready
             import time
             import urllib.request
             for _ in range(50):
@@ -126,7 +148,6 @@ def main():
                 except Exception:
                     time.sleep(0.1)
 
-            # Create native window
             webview.create_window(
                 "Claude Code Usage",
                 url,
@@ -139,7 +160,6 @@ def main():
         except ImportError:
             pass
 
-    # Fallback: browser mode
     if not no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
 

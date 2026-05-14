@@ -2,7 +2,8 @@
 
 import json
 import os
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from collections import defaultdict
 from pathlib import Path
@@ -13,6 +14,14 @@ import psutil
 def get_claude_dir() -> Path:
     """Get the Claude Code data directory."""
     return Path.home() / ".claude"
+
+
+def get_codex_dir() -> Path:
+    """Get the Codex CLI data directory."""
+    env = os.environ.get("CODEX_HOME")
+    if env:
+        return Path(env)
+    return Path.home() / ".codex"
 
 
 def parse_sessions_metadata(claude_dir: Path) -> dict[str, dict]:
@@ -57,9 +66,6 @@ def parse_jsonl_file(filepath: str) -> dict:
         "timestamps": [],
     }
 
-    # Track seen requestIds to avoid double-counting tokens.
-    # A single API call can produce two JSONL records (thinking + text/tool_use)
-    # with identical usage data, so we must deduplicate.
     seen_request_ids: set[str] = set()
 
     def _process_lines(fpath: str) -> None:
@@ -101,7 +107,6 @@ def parse_jsonl_file(filepath: str) -> dict:
                         session_data["assistant_message_count"] += 1
                         session_data["message_count"] += 1
 
-                        # Deduplicate by requestId to avoid double-counting
                         request_id = record.get("requestId", "")
                         if request_id and request_id in seen_request_ids:
                             if timestamp_str:
@@ -135,10 +140,8 @@ def parse_jsonl_file(filepath: str) -> dict:
         except IOError:
             pass
 
-    # Parse main session file
     _process_lines(filepath)
 
-    # Also parse subagent files for this session
     session_id = Path(filepath).stem
     subagent_dir = Path(filepath).parent / session_id / "subagents"
     if subagent_dir.is_dir():
@@ -159,7 +162,6 @@ def find_all_session_files(claude_dir: Path) -> list[str]:
         if not project_dir.is_dir():
             continue
         for jsonl_file in project_dir.glob("*.jsonl"):
-            # Skip subagent files
             if "/subagents/" in str(jsonl_file):
                 continue
             files.append(str(jsonl_file))
@@ -181,7 +183,6 @@ def get_all_usage_data(claude_dir: Optional[Path] = None) -> dict:
         if session_data["message_count"] == 0:
             continue
 
-        # Attach project info from filepath
         parts = Path(filepath).parts
         project_idx = parts.index("projects") if "projects" in parts else -1
         project_name = parts[project_idx + 1] if project_idx >= 0 and project_idx + 1 < len(parts) else "unknown"
@@ -189,7 +190,6 @@ def get_all_usage_data(claude_dir: Optional[Path] = None) -> dict:
         session_data["project"] = project_name
         session_data["filepath"] = filepath
 
-        # Merge metadata if available
         sid = session_data["session_id"]
         if sid in sessions_meta:
             meta = sessions_meta[sid]
@@ -199,9 +199,154 @@ def get_all_usage_data(claude_dir: Optional[Path] = None) -> dict:
             if meta.get("startedAt"):
                 session_data["started_at_epoch"] = meta["startedAt"]
 
-        # Convert defaultdict to regular dict for JSON serialization
         session_data["models"] = dict(session_data["models"])
 
+        all_sessions.append(session_data)
+
+    for s in all_sessions:
+        s["source"] = "claude"
+
+    return {"sessions": all_sessions}
+
+
+def find_all_codex_session_files(codex_dir: Path) -> list[str]:
+    """Find all Codex rollout JSONL files under ~/.codex/sessions/."""
+    files = []
+    sessions_dir = codex_dir / "sessions"
+    if not sessions_dir.exists():
+        return files
+    for jsonl_file in sessions_dir.rglob("*.jsonl"):
+        files.append(str(jsonl_file))
+    return files
+
+
+def parse_codex_jsonl_file(filepath: str) -> dict:
+    """Parse a single Codex rollout JSONL file and extract usage data."""
+    session_data = {
+        "session_id": "",
+        "messages": [],
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "models": defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "count": 0}),
+        "start_time": None,
+        "end_time": None,
+        "message_count": 0,
+        "user_message_count": 0,
+        "assistant_message_count": 0,
+        "timestamps": [],
+    }
+
+    current_model = ""
+    last_total_in = 0
+    last_total_out = 0
+
+    try:
+        with open(filepath, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                ts_str = record.get("timestamp", "")
+                if ts_str:
+                    try:
+                        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        if session_data["start_time"] is None or ts < session_data["start_time"]:
+                            session_data["start_time"] = ts
+                        if session_data["end_time"] is None or ts > session_data["end_time"]:
+                            session_data["end_time"] = ts
+                    except ValueError:
+                        pass
+
+                rec_type = record.get("type", "")
+                payload = record.get("payload") or {}
+                if not isinstance(payload, dict):
+                    continue
+
+                if rec_type == "session_meta":
+                    sid = payload.get("id") or payload.get("session_id") or ""
+                    if sid and not session_data["session_id"]:
+                        session_data["session_id"] = sid
+                    cwd = payload.get("cwd") or payload.get("workingDir") or ""
+                    if cwd:
+                        session_data["cwd"] = cwd
+                    model = payload.get("model")
+                    if model and not current_model:
+                        current_model = model
+
+                elif rec_type == "turn_context":
+                    model = payload.get("model")
+                    if model:
+                        current_model = model
+
+                elif rec_type == "response_item":
+                    p_type = payload.get("type", "")
+                    if p_type == "message":
+                        role = payload.get("role", "")
+                        if role == "user":
+                            session_data["user_message_count"] += 1
+                            session_data["message_count"] += 1
+                            if ts_str:
+                                session_data["timestamps"].append(ts_str)
+                        elif role == "assistant":
+                            session_data["assistant_message_count"] += 1
+                            session_data["message_count"] += 1
+                            if ts_str:
+                                session_data["timestamps"].append(ts_str)
+
+                elif rec_type == "event_msg":
+                    p_type = payload.get("type", "")
+                    if p_type == "token_count":
+                        info = payload.get("info") or {}
+                        last_usage = info.get("last_token_usage") or {}
+                        in_t = (last_usage.get("input_tokens") or 0) + (last_usage.get("cached_input_tokens") or 0)
+                        out_t = (last_usage.get("output_tokens") or 0) + (last_usage.get("reasoning_output_tokens") or 0)
+                        if in_t == 0 and out_t == 0:
+                            total = info.get("total_token_usage") or {}
+                            cur_in = (total.get("input_tokens") or 0) + (total.get("cached_input_tokens") or 0)
+                            cur_out = (total.get("output_tokens") or 0) + (total.get("reasoning_output_tokens") or 0)
+                            in_t = max(0, cur_in - last_total_in)
+                            out_t = max(0, cur_out - last_total_out)
+                            last_total_in = cur_in
+                            last_total_out = cur_out
+                        if in_t == 0 and out_t == 0:
+                            continue
+                        model_key = current_model or "codex"
+                        session_data["total_input_tokens"] += in_t
+                        session_data["total_output_tokens"] += out_t
+                        session_data["models"][model_key]["input_tokens"] += in_t
+                        session_data["models"][model_key]["output_tokens"] += out_t
+                        session_data["models"][model_key]["count"] += 1
+    except IOError:
+        pass
+
+    if not session_data["session_id"]:
+        stem = Path(filepath).stem
+        m = re.search(r"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})", stem)
+        session_data["session_id"] = m.group(1) if m else stem
+
+    return session_data
+
+
+def get_all_codex_usage_data(codex_dir: Optional[Path] = None) -> dict:
+    """Parse all Codex rollout files and return data shaped like Claude's."""
+    if codex_dir is None:
+        codex_dir = get_codex_dir()
+
+    session_files = find_all_codex_session_files(codex_dir)
+    all_sessions = []
+
+    for filepath in session_files:
+        session_data = parse_codex_jsonl_file(filepath)
+        if session_data["message_count"] == 0:
+            continue
+        session_data["filepath"] = filepath
+        session_data["source"] = "codex"
+        session_data["models"] = dict(session_data["models"])
         all_sessions.append(session_data)
 
     return {"sessions": all_sessions}
@@ -226,7 +371,6 @@ def aggregate_stats(sessions: list[dict], start_date: Optional[datetime] = None,
     total_output_tokens = sum(s["total_output_tokens"] for s in filtered)
     total_tokens = total_input_tokens + total_output_tokens
 
-    # Active days
     active_dates = set()
     all_hours = defaultdict(int)
     for s in filtered:
@@ -243,7 +387,6 @@ def aggregate_stats(sessions: list[dict], start_date: Optional[datetime] = None,
 
     active_days = len(active_dates)
 
-    # Streaks
     sorted_dates = sorted(active_dates)
     current_streak = 0
     longest_streak = 0
@@ -258,7 +401,6 @@ def aggregate_stats(sessions: list[dict], start_date: Optional[datetime] = None,
                 streak = 1
         longest_streak = max(longest_streak, streak)
 
-        # Current streak: count backward from today/most recent date
         today = datetime.now(timezone.utc).date()
         if sorted_dates[-1] >= today or (today - sorted_dates[-1]).days <= 1:
             current_streak = 1
@@ -268,10 +410,8 @@ def aggregate_stats(sessions: list[dict], start_date: Optional[datetime] = None,
                 else:
                     break
 
-    # Peak hour
     peak_hour = max(all_hours, key=all_hours.get) if all_hours else 0
 
-    # Models aggregation
     models_agg: dict[str, dict[str, int]] = {}
     for s in filtered:
         for model, data in s.get("models", {}).items():
@@ -283,7 +423,6 @@ def aggregate_stats(sessions: list[dict], start_date: Optional[datetime] = None,
             models_agg[model]["output_tokens"] += data["output_tokens"]
             models_agg[model]["count"] += data["count"]
 
-    # Favorite model
     favorite_model = ""
     if models_agg:
         favorite_model = max(
@@ -291,7 +430,6 @@ def aggregate_stats(sessions: list[dict], start_date: Optional[datetime] = None,
             key=lambda m: models_agg[m]["input_tokens"] + models_agg[m]["output_tokens"],
         )
 
-    # Daily token breakdown
     daily_tokens: dict[str, dict[str, dict[str, int]]] = defaultdict(
         lambda: defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0})
     )
@@ -303,12 +441,10 @@ def aggregate_stats(sessions: list[dict], start_date: Optional[datetime] = None,
             daily_tokens[date_str][model]["input_tokens"] += data["input_tokens"]
             daily_tokens[date_str][model]["output_tokens"] += data["output_tokens"]
 
-    # Convert to serializable
     daily_tokens_out = {}
     for date, models in sorted(daily_tokens.items()):
         daily_tokens_out[date] = {m: dict(v) for m, v in models.items()}
 
-    # Heatmap data: date -> message count
     heatmap: dict[str, int] = defaultdict(int)
     for s in filtered:
         for ts_str in s.get("timestamps", []):
@@ -318,7 +454,6 @@ def aggregate_stats(sessions: list[dict], start_date: Optional[datetime] = None,
             except ValueError:
                 pass
 
-    # Models sorted by total tokens descending
     models_sorted = sorted(
         [
             {
@@ -387,7 +522,6 @@ def get_active_sessions(claude_dir: Optional[Path] = None) -> list[dict]:
                     "is_alive": True,
                 }
 
-                # Find and parse the session's JSONL for real-time info
                 projects_dir = claude_dir / "projects"
                 if projects_dir.exists():
                     for jsonl_file in projects_dir.rglob(f"{session_id}.jsonl"):
@@ -395,7 +529,6 @@ def get_active_sessions(claude_dir: Optional[Path] = None) -> list[dict]:
                         session_info.update(rt_data)
                         break
 
-                # Count subagents
                 for project_dir in (claude_dir / "projects").iterdir():
                     sub_dir = project_dir / session_id / "subagents"
                     if sub_dir.exists():
@@ -493,11 +626,7 @@ def _parse_realtime_data(filepath: str) -> dict:
 
 
 def get_session_messages(claude_dir: Path, session_id: str, offset: int = 0) -> dict:
-    """Read messages from a session JSONL file starting from line offset.
-
-    Returns structured messages suitable for the detail view, merging
-    assistant content blocks that share the same requestId.
-    """
+    """Read messages from a session JSONL file starting from line offset."""
     projects_dir = claude_dir / "projects"
     jsonl_path: Optional[Path] = None
     for f in projects_dir.rglob(f"{session_id}.jsonl"):
@@ -515,7 +644,7 @@ def get_session_messages(claude_dir: Path, session_id: str, offset: int = 0) -> 
 
     new_offset = len(all_lines)
     messages: list[dict] = []
-    request_map: dict[str, int] = {}  # requestId -> index in messages
+    request_map: dict[str, int] = {}
 
     for line in all_lines[offset:]:
         line = line.strip()
@@ -556,7 +685,6 @@ def get_session_messages(claude_dir: Path, session_id: str, offset: int = 0) -> 
                 continue
 
             if request_id and request_id in request_map:
-                # Merge additional content blocks from same API call
                 messages[request_map[request_id]]["content"].extend(content_blocks)
             else:
                 usage = msg.get("usage", {})
@@ -598,8 +726,6 @@ def format_tokens(n: int) -> str:
         return f"{n / 1_000:.1f}k"
     return str(n)
 
-
-# ---------- Git Code Lines Stats ----------
 
 LANG_EXTENSIONS = {
     "JavaScript": [".js", ".jsx", ".mjs", ".cjs"],
@@ -715,4 +841,132 @@ def get_code_lines_stats(claude_dir: Optional[Path] = None) -> dict:
         "daily": daily,
         "total": grand_total,
         "languages": langs_total,
+    }
+
+
+def get_quota_stats(claude_dir: Optional[Path] = None) -> dict:
+    """Return token usage for the current 5-hour window and current week."""
+    if claude_dir is None:
+        claude_dir = get_claude_dir()
+
+    now = datetime.now(timezone.utc)
+    five_h_ago = now - timedelta(hours=5)
+
+    days_since_monday = now.weekday()
+    week_start = (now - timedelta(days=days_since_monday)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    next_week_start = week_start + timedelta(days=7)
+
+    tokens_5h_in = 0
+    tokens_5h_out = 0
+    tokens_week_in = 0
+    tokens_week_out = 0
+    earliest_5h_ts: Optional[datetime] = None
+
+    seen_request_ids: set[str] = set()
+
+    projects_dir = claude_dir / "projects"
+    if not projects_dir.exists():
+        return _build_quota_response(
+            0, 0, None, 0, 0, week_start, next_week_start, now
+        )
+
+    for jsonl_file in projects_dir.rglob("*.jsonl"):
+        try:
+            mtime = datetime.fromtimestamp(jsonl_file.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            continue
+        if mtime < week_start:
+            continue
+
+        try:
+            with open(jsonl_file, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if record.get("type") != "assistant":
+                        continue
+
+                    ts_str = record.get("timestamp", "")
+                    if not ts_str:
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+
+                    if ts < week_start:
+                        continue
+
+                    request_id = record.get("requestId", "")
+                    if request_id:
+                        if request_id in seen_request_ids:
+                            continue
+                        seen_request_ids.add(request_id)
+
+                    msg = record.get("message", {})
+                    if msg.get("model") == "<synthetic>":
+                        continue
+
+                    usage = msg.get("usage", {})
+                    in_t = (
+                        (usage.get("input_tokens") or 0)
+                        + (usage.get("cache_creation_input_tokens") or 0)
+                        + (usage.get("cache_read_input_tokens") or 0)
+                    )
+                    out_t = usage.get("output_tokens") or 0
+
+                    tokens_week_in += in_t
+                    tokens_week_out += out_t
+
+                    if ts >= five_h_ago:
+                        tokens_5h_in += in_t
+                        tokens_5h_out += out_t
+                        if earliest_5h_ts is None or ts < earliest_5h_ts:
+                            earliest_5h_ts = ts
+        except (IOError, OSError):
+            continue
+
+    return _build_quota_response(
+        tokens_5h_in, tokens_5h_out, earliest_5h_ts,
+        tokens_week_in, tokens_week_out,
+        week_start, next_week_start, now,
+    )
+
+
+def _build_quota_response(
+    tokens_5h_in: int, tokens_5h_out: int, earliest_5h_ts: Optional[datetime],
+    tokens_week_in: int, tokens_week_out: int,
+    week_start: datetime, next_week_start: datetime, now: datetime,
+) -> dict:
+    reset_5h: Optional[datetime] = (
+        earliest_5h_ts + timedelta(hours=5) if earliest_5h_ts else None
+    )
+    secs_to_5h = max(0, int((reset_5h - now).total_seconds())) if reset_5h and reset_5h > now else 0
+    secs_to_week = max(0, int((next_week_start - now).total_seconds()))
+
+    return {
+        "window_5h": {
+            "input_tokens": tokens_5h_in,
+            "output_tokens": tokens_5h_out,
+            "total_tokens": tokens_5h_in + tokens_5h_out,
+            "started_at": earliest_5h_ts.isoformat() if earliest_5h_ts else None,
+            "resets_at": reset_5h.isoformat() if reset_5h else None,
+            "seconds_to_reset": secs_to_5h,
+        },
+        "window_week": {
+            "input_tokens": tokens_week_in,
+            "output_tokens": tokens_week_out,
+            "total_tokens": tokens_week_in + tokens_week_out,
+            "started_at": week_start.isoformat(),
+            "resets_at": next_week_start.isoformat(),
+            "seconds_to_reset": secs_to_week,
+        },
     }
