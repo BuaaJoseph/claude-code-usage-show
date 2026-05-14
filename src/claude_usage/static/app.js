@@ -16,9 +16,17 @@ let quota5hSecsRemaining = 0;
 let quotaWeekSecsRemaining = 0;
 let quotaLastFetchMs = 0;
 
-// Estimated plan limits for percentage display
-const PLAN_5H_LIMIT = 88000;
-const PLAN_WEEK_LIMIT = 880000;
+// Plan tier caps (non-cached tokens per 5h block / per week)
+const PLAN_CAPS = {
+    pro:   { five_h: 44000,   weekly: 440000 },
+    max5:  { five_h: 88000,   weekly: 880000 },
+    max20: { five_h: 220000,  weekly: 2200000 },
+};
+
+function getCurrentPlanCap() {
+    const plan = localStorage.getItem('plan_tier') || 'max5';
+    return PLAN_CAPS[plan] || PLAN_CAPS.max5;
+}
 
 // Store latest realtime session data by session_id for detail view
 const _realtimeSessions = {};
@@ -40,16 +48,28 @@ document.addEventListener('DOMContentLoaded', () => {
     startStatsPolling();
     startQuotaPolling();
 
+    const planSelect = document.getElementById('plan-select');
+    if (planSelect) {
+        planSelect.value = localStorage.getItem('plan_tier') || 'max5';
+        planSelect.addEventListener('change', (e) => {
+            localStorage.setItem('plan_tier', e.target.value);
+            renderPlanUsage();
+        });
+    }
+
     document.getElementById('detail-back-btn').addEventListener('click', closeSessionDetail);
 });
 
 function setupSourceSelector() {
+    const sourceNames = { all: 'All sessions', claude: 'Claude Code', codex: 'Codex' };
     document.querySelectorAll('.source-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             if (btn.dataset.source === currentSource) return;
             document.querySelectorAll('.source-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             currentSource = btn.dataset.source;
+            const indicator = document.getElementById('source-indicator-label');
+            if (indicator) indicator.textContent = sourceNames[currentSource] || currentSource;
             fetchStats();
         });
     });
@@ -66,6 +86,12 @@ function setupTabs() {
 
             const trg = document.getElementById('timeRangeGroup');
             trg.style.display = currentTab === 'realtime' ? 'none' : 'flex';
+
+            const sourceSelector = document.getElementById('sourceSelector');
+            const sourceIndicator = document.getElementById('sourceIndicator');
+            const isRealtime = currentTab === 'realtime';
+            if (sourceSelector) sourceSelector.style.display = isRealtime ? 'none' : 'flex';
+            if (sourceIndicator) sourceIndicator.style.display = isRealtime ? 'none' : 'block';
 
             if (currentTab === 'realtime') {
                 fetchRealtime();
@@ -140,12 +166,13 @@ function renderPlanUsage() {
     if (!quotaData) return;
     const w5h = quotaData.window_5h;
     const wk = quotaData.window_week;
+    const cap = getCurrentPlanCap();
 
     const pct5h = w5h.total_tokens > 0
-        ? Math.min(100, Math.round(w5h.total_tokens / PLAN_5H_LIMIT * 100))
+        ? Math.min(100, Math.round(w5h.total_tokens / cap.five_h * 100))
         : 0;
     const pctWk = wk.total_tokens > 0
-        ? Math.min(100, Math.round(wk.total_tokens / PLAN_WEEK_LIMIT * 100))
+        ? Math.min(100, Math.round(wk.total_tokens / cap.weekly * 100))
         : 0;
 
     const bar5h = document.getElementById('plan-5h-bar');
@@ -169,12 +196,13 @@ function updatePlanInfoText() {
 
     const w5h = quotaData.window_5h;
     const wk = quotaData.window_week;
+    const cap = getCurrentPlanCap();
 
     const pct5h = w5h.total_tokens > 0
-        ? Math.min(100, Math.round(w5h.total_tokens / PLAN_5H_LIMIT * 100))
+        ? Math.min(100, Math.round(w5h.total_tokens / cap.five_h * 100))
         : 0;
     const pctWk = wk.total_tokens > 0
-        ? Math.min(100, Math.round(wk.total_tokens / PLAN_WEEK_LIMIT * 100))
+        ? Math.min(100, Math.round(wk.total_tokens / cap.weekly * 100))
         : 0;
 
     const info5h = document.getElementById('plan-5h-info');
@@ -240,6 +268,18 @@ function renderCurrentTab() {
 }
 
 function renderOverview(data) {
+    const noDataEl = document.getElementById('no-data-msg');
+    if (noDataEl) {
+        if (data.total_sessions === 0 && currentSource !== 'all') {
+            const srcLabel = currentSource === 'codex'
+                ? 'Codex (~/.codex/sessions/)' : 'Claude Code';
+            noDataEl.textContent = `No ${srcLabel} sessions found.`;
+            noDataEl.style.display = 'block';
+        } else {
+            noDataEl.style.display = 'none';
+        }
+    }
+
     setText('stat-sessions', formatNumber(data.total_sessions));
     setText('stat-messages', formatNumber(data.total_messages));
     setText('stat-tokens', formatTokens(data.total_tokens));
