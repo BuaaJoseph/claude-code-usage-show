@@ -352,7 +352,7 @@ body {
 .heatmap-container {
     display: flex;
     gap: 3px;
-    overflow-x: auto;
+    overflow-x: hidden;
     overflow-y: visible;
     padding: 24px 0 12px 0;
     width: 100%;
